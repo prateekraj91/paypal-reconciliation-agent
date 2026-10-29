@@ -228,7 +228,12 @@ def test_previously_approved_payment_cannot_be_allocated_again():
 
 
 def test_split_allocation_across_two_invoices_can_pass():
-    payment = pay(1, 50000, reference="INV-1001")
+    payment = pay(
+        1,
+        50000,
+        reference="INV-1001",
+        note="Also paying INV-1002",
+    )
     invoice_a = inv(1, 25000)
     invoice_b = inv(2, 25000)
     proposal = make_proposal(
@@ -254,3 +259,23 @@ def test_duplicate_invoice_ids_fail_closed():
 
     assert not result.passed
     assert any("duplicate invoice IDs" in issue for issue in result.issues)
+
+
+def test_reference_evidence_tag_does_not_prove_identity():
+    payment = pay(1, 50000)  # No reference or note
+    invoice = inv(1, 50000)
+
+    # Deliberately claim reference evidence when none exists.
+    proposal = make_proposal(
+        payment,
+        [allocation(payment, invoice, 50000)],
+        reference_evidence=True,
+    )
+
+    result = verify(proposal, payment, [invoice])
+
+    assert not result.passed
+    assert any(
+        "invoice reference" in issue.lower()
+        for issue in result.issues
+    )
