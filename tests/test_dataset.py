@@ -76,3 +76,32 @@ def test_traps_exist():
         if t.category is CaseCategory.AMOUNT_COLLISION:
             assert PAY[t.payment_id].amount_cents in open_amounts
             assert t.resolution is Resolution.NEEDS_HUMAN and not t.allocations
+
+
+def test_unique_payments_collapses_identical_duplicate_deliveries():
+    assert len(DS.payments) == 118
+    assert len(DS.unique_payments) == 113
+    assert len({
+        payment.payment_id for payment in DS.unique_payments
+    }) == 113
+
+
+def test_unique_payments_rejects_conflicting_records_with_same_id():
+    from dataclasses import replace
+    import pytest
+    from reconcile.dataset import Dataset
+
+    original = DS.payments[0]
+    conflicting = replace(
+        original,
+        amount_cents=original.amount_cents + 100,
+    )
+    contaminated = Dataset(
+        seed=DS.seed,
+        invoices=DS.invoices,
+        payments=DS.payments + (conflicting,),
+        truth=DS.truth,
+    )
+
+    with pytest.raises(ValueError, match="conflicting deliveries"):
+        _ = contaminated.unique_payments
