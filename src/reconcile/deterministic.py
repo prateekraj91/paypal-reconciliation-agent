@@ -8,6 +8,7 @@ from .baseline import BaselineConfig, BaselineMatcher, _Run
 from .models import (
     Evidence,
     EvidenceCode,
+    Invoice,
     MatchProposal,
     Payment,
     PaymentStatus,
@@ -19,7 +20,9 @@ class DeterministicMatcher(BaselineMatcher):
     """Resolve exact, uniquely referenced invoices without amount-only guesses.
 
     This first version supports references in the structured reference field
-    or payment note. Partial and grouped payments remain unresolved for now.
+    or payment note. Partial payments are allowed when a trusted reference is
+    present: the allocation equals the payment amount and must not exceed the
+    outstanding balance. Grouped payments remain unresolved for now.
     """
 
     def __init__(self) -> None:
@@ -125,9 +128,9 @@ class DeterministicMatcher(BaselineMatcher):
 
         invoice = hits[0]
 
-        # 4. Reuse the baseline's safety checks for invoice status, currency,
-        # already-claimed invoices and exact outstanding amount.
-        blockers = run.blockers(p, invoice)
+        # 4. Custom blocker checks: allow partial payments (payment ≤ outstanding)
+        #    instead of requiring exact match like the baseline.
+        blockers = self._partial_blockers(p, invoice, run)
         if blockers:
             return self._no_match(p, *blockers)
 
@@ -136,15 +139,61 @@ class DeterministicMatcher(BaselineMatcher):
             if reference in reference_hits
             else "payment note"
         )
+
+        outstanding = run.outstanding[invoice.invoice_id]
+        if p.amount_cents == outstanding:
+            amount_evidence = Evidence(
+                EvidenceCode.AMOUNT_EXACT,
+                f"{p.amount_cents} cents equals the outstanding balance",
+            )
+        else:
+            amount_evidence = Evidence(
+                EvidenceCode.AMOUNT_PARTIAL,
+                f"{p.amount_cents} cents is a partial payment against "
+                f"{outstanding} cents outstanding on {invoice.number}",
+            )
+
         evidence = (
             Evidence(
                 EvidenceCode.REFERENCE_MATCH,
                 f"invoice {invoice.number} extracted from the {source}",
             ),
-            Evidence(
-                EvidenceCode.AMOUNT_EXACT,
-                f"{p.amount_cents} cents equals the outstanding balance",
-            ),
+            amount_evidence,
         )
 
         return self._proposed(p, invoice, run, evidence)
+
+    # ------------------------------------------------------------------
+    # Blocker logic: relaxed to allow partial payments
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _partial_blockers(p: Payment, inv: Invoice, run: _Run) -> list[Evidence]:
+        """Like _Run.blockers but allows payment ≤ outstanding (partial payments).
+
+        The baseline's blockers() requires payment == outstanding (exact match).
+        Here we only reject if the payment exceeds the outstanding balance, or
+        if other hard constraints (currency, status, already-claimed) fail.
+        """
+        out: list[Evidence] = []
+        if inv.currency != p.currency:
+            out.append(Evidence(EvidenceCode.CURRENCY_MISMATCH, f"{p.currency} payment vs {inv.currency} invoice"))
+        if not inv.is_open:
+            out.append(Evidence(EvidenceCode.INVOICE_NOT_OPEN, f"invoice {inv.number} is {inv.status.value}"))
+        if inv.invoice_id in run.claimed:
+            out.append(
+                Evidence(
+                    EvidenceCode.INVOICE_ALREADY_CLAIMED,
+                    f"invoice {inv.number} already proposed for payment {run.claimed[inv.invoice_id]}",
+                )
+            )
+        outstanding = run.outstanding[inv.invoice_id]
+        if p.amount_cents > outstanding:
+            out.append(
+                Evidence(
+                    EvidenceCode.AMOUNT_MISMATCH,
+                    f"payment {p.amount_cents} exceeds outstanding {outstanding} on {inv.number}",
+                )
+            )
+        return out
+
