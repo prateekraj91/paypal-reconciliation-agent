@@ -21,6 +21,7 @@ from .models import (
     PaymentStatus,
     outstanding_cents,
 )
+from .normalize import canonical_reference, extract_invoice_references
 
 
 @dataclass(frozen=True)
@@ -50,8 +51,13 @@ def verify_proposals(
     proposal_counts = Counter(p.payment_id for p in proposals)
     invoices_by_id: dict[str, list[Invoice]] = defaultdict(list)
 
+    invoices_by_number: dict[str, list[Invoice]] = defaultdict(list)
+
     for invoice in invoices:
         invoices_by_id[invoice.invoice_id].append(invoice)
+        normalized_number = canonical_reference(invoice.number)
+        if normalized_number:
+            invoices_by_number[normalized_number].append(invoice)
 
     payments_by_id = {
         payment.payment_id: payment
@@ -104,6 +110,15 @@ def verify_proposals(
 
         candidate = proposal.candidates[0]
 
+        # Independently derive references from the source records.
+        actual_references = {
+            canonical_reference(number)
+            for number in extract_invoice_references(
+                [payment.reference, payment.note],
+                [invoice.number for invoice in invoices],
+            )
+        }
+
         # Do not let exact amounts alone pass verification.
         if not candidate.has(EvidenceCode.REFERENCE_MATCH):
             issues.append(
@@ -155,6 +170,24 @@ def verify_proposals(
                 continue
 
             invoice = invoice_matches[0]
+
+            normalized_number = canonical_reference(invoice.number)
+
+            if normalized_number not in actual_references:
+                issues.append(
+                    f"payment reference or note does not contain "
+                    f"invoice reference {invoice.number!r}"
+                )
+
+            matching_numbers = invoices_by_number.get(normalized_number, [])
+            distinct_invoice_ids = {
+                record.invoice_id for record in matching_numbers
+            }
+            if len(distinct_invoice_ids) > 1:
+                issues.append(
+                    f"invoice reference {invoice.number!r} matches "
+                    f"multiple invoice records"
+                )
 
             if not invoice.is_open:
                 issues.append(
