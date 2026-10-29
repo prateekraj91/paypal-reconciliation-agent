@@ -42,7 +42,7 @@ def main() -> None:
 
         results = verify_proposals(
             proposed,
-            dataset.payments,
+            dataset.unique_payments,
             dataset.invoices,
         )
 

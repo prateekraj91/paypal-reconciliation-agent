@@ -78,6 +78,28 @@ class Dataset:
     def unique_payment_count(self) -> int:
         return len({p.payment_id for p in self.payments})
 
+    @property
+    def unique_payments(self) -> tuple[Payment, ...]:
+        """Return canonical payment records, collapsing identical replays.
+
+        Repeated deliveries with identical data are the same payment.
+        Conflicting records sharing an ID must fail closed.
+        """
+        by_id: dict[str, Payment] = {}
+
+        for payment in self.payments:
+            previous = by_id.get(payment.payment_id)
+
+            if previous is None:
+                by_id[payment.payment_id] = payment
+            elif previous != payment:
+                raise ValueError(
+                    f"conflicting deliveries for payment ID "
+                    f"{payment.payment_id!r}"
+                )
+
+        return tuple(by_id.values())
+
 
 DEFAULT_MIX: dict[CaseCategory, int] = {
     CaseCategory.EXACT_REFERENCE: 24,
