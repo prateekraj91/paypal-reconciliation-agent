@@ -188,3 +188,140 @@ def test_format_round_trips_with_parse():
 def test_format_rejects_a_non_integer_amount():
     with pytest.raises(TypeError):
         format_minor_units(25.5, "USD")
+
+
+# --------------------------------------------------------------------------
+# Additional thorough coverage for D2 requirements
+# --------------------------------------------------------------------------
+
+
+def test_inr_exponent_is_two_and_scales_correctly():
+    """USD and INR must both have exponent 2."""
+    assert minor_unit_exponent("INR") == 2
+    assert parse_money_to_minor_units("100.50", "INR") == 10050
+    assert parse_money_to_minor_units("0.05", "INR") == 5
+    assert format_minor_units(10050, "INR") == "100.50"
+
+
+@pytest.mark.parametrize(
+    "currency,value",
+    [
+        ("USD", "10.001"),
+        ("USD", "0.0001"),
+        ("USD", "25.999"),
+        ("INR", "100.555"),
+        ("INR", "0.001"),
+        ("EUR", "19.999"),
+        ("JPY", "1.1"),
+        ("JPY", "0.01"),
+        ("JPY", "100.5"),
+        ("KRW", "1000.5"),
+        ("HUF", "250.2"),
+        ("CLP", "500.1"),
+        ("BHD", "1.0001"),
+        ("KWD", "0.0005"),
+        ("OMR", "10.1234"),
+        ("TND", "5.00001"),
+    ],
+)
+def test_precision_beyond_supported_minor_unit_fails_closed(currency, value):
+    """Never silently round: excess precision must raise a ValueError mentioning precision."""
+    with pytest.raises(ValueError) as excinfo:
+        parse_money_to_minor_units(value, currency)
+    assert "precision" in str(excinfo.value).lower()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "   \t\n  ",
+        "$10.00",
+        "10.00 USD",
+        "10,000.00",
+        "10..00",
+        "--10.00",
+        "++10.00",
+        "10-00",
+        "10/2",
+        "-NaN",
+        "+Infinity",
+        "-inf",
+        "None",
+        "null",
+        "undefined",
+        "0x10",
+        "10.0.0",
+        "10e2",
+    ],
+)
+def test_malformed_string_values_are_strictly_rejected(bad):
+    with pytest.raises(ValueError):
+        parse_money_to_minor_units(bad, "USD")
+
+
+@pytest.mark.parametrize(
+    "currency",
+    [
+        "BIF", "CLP", "DJF", "GNF", "HUF", "ISK", "JPY", "KMF",
+        "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF",
+    ],
+)
+def test_all_zero_decimal_currencies_parse_and_format_without_scaling(currency):
+    """Zero-decimal currencies must have exponent 0 and no fractional parts."""
+    assert minor_unit_exponent(currency) == 0
+    assert parse_money_to_minor_units("500", currency) == 500
+    assert parse_money_to_minor_units("0", currency) == 0
+    assert parse_money_to_minor_units("-50", currency) == -50
+    assert format_minor_units(500, currency) == "500"
+    with pytest.raises(ValueError):
+        parse_money_to_minor_units("500.5", currency)
+
+
+@pytest.mark.parametrize(
+    "currency",
+    ["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"],
+)
+def test_all_three_decimal_currencies_parse_and_format_three_places(currency):
+    """Three-decimal currencies must have exponent 3 and format with 3 decimal places."""
+    assert minor_unit_exponent(currency) == 3
+    assert parse_money_to_minor_units("1.234", currency) == 1234
+    assert parse_money_to_minor_units("0.001", currency) == 1
+    assert parse_money_to_minor_units("-1.234", currency) == -1234
+    assert format_minor_units(1234, currency) == "1.234"
+    assert format_minor_units(1, currency) == "0.001"
+    assert format_minor_units(0, currency) == "0.000"
+    with pytest.raises(ValueError):
+        parse_money_to_minor_units("1.2345", currency)
+
+
+@pytest.mark.parametrize(
+    "crypto_or_invalid",
+    ["BTC", "ETH", "SOL", "XYZ", "ZZZ", "XAU", "XAG", "ABC"],
+)
+def test_unsupported_and_crypto_currencies_raise_unsupported_error(crypto_or_invalid):
+    with pytest.raises(UnsupportedCurrencyError) as excinfo:
+        minor_unit_exponent(crypto_or_invalid)
+    assert crypto_or_invalid in str(excinfo.value)
+    with pytest.raises(UnsupportedCurrencyError):
+        parse_money_to_minor_units("10.00", crypto_or_invalid)
+
+
+@pytest.mark.parametrize(
+    "non_three_letter",
+    ["USDT", "DOGE", "TOOLONG", "A", "AB", "123", "US1"],
+)
+def test_non_three_letter_currencies_raise_value_error(non_three_letter):
+    with pytest.raises(ValueError):
+        minor_unit_exponent(non_three_letter)
+    with pytest.raises(ValueError):
+        parse_money_to_minor_units("10.00", non_three_letter)
+
+
+def test_accounting_zero_and_negative_amounts_preserve_exact_minor_units():
+    """Verify that zero and negative amounts preserve exact values across 0, 2, and 3 exponents."""
+    assert parse_money_to_minor_units("0.00", "USD") == 0
+    assert parse_money_to_minor_units("-10.00", "USD") == -1000
+    assert parse_money_to_minor_units("0", "JPY") == 0
+    assert parse_money_to_minor_units("-100", "JPY") == -100
+    assert parse_money_to_minor_units("0.000", "BHD") == 0
+    assert parse_money_to_minor_units("-1.500", "BHD") == -1500

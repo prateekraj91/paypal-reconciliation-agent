@@ -191,13 +191,17 @@ def _usable_count(value: Any) -> Optional[int]:
     return value if value >= 0 else None
 
 
-def _parse_money_to_cents(value: Any, currency: str) -> int:
+def _parse_money_to_minor_units(value: Any, currency: str) -> int:
     """Parse a PayPal monetary string into integer minor units of `currency`.
 
     The currency is required because the scaling factor depends on it: 1000 JPY
     is 1000 minor units, not 100000. See money.MINOR_UNIT_EXPONENTS.
     """
     return parse_money_to_minor_units(value, currency)
+
+
+# Backwards-compatibility alias for test suites and existing callers
+_parse_money_to_cents = _parse_money_to_minor_units
 
 
 def _load_dotenv(filepath: str = ".env") -> dict[str, str]:
@@ -1034,13 +1038,13 @@ class PayPalClient:
         # Monetary fields
         amount_dict = item.get("amount") or {}
         currency = _invoice_currency(item)
-        amount_cents = _parse_money_to_cents(amount_dict.get("value", "0.00"), currency)
+        amount_cents = _parse_money_to_minor_units(amount_dict.get("value", "0.00"), currency)
 
         # Outstanding due amount
         due_amount_cents: Optional[int] = None
         due_dict = item.get("due_amount")
         if due_dict and "value" in due_dict:
-            due_amount_cents = _parse_money_to_cents(due_dict["value"], currency)
+            due_amount_cents = _parse_money_to_minor_units(due_dict["value"], currency)
 
         # Dates
         invoice_date_str = detail.get("invoice_date")
@@ -1098,7 +1102,7 @@ class PayPalClient:
         has_refund_amount = False
         if "value" in refund_amt_dict:
             try:
-                has_refund_amount = _parse_money_to_cents(refund_amt_dict["value"], inv_curr) > 0
+                has_refund_amount = _parse_money_to_minor_units(refund_amt_dict["value"], inv_curr) > 0
             except ValueError:
                 pass
         if refund_txns or has_refund_amount:
@@ -1152,7 +1156,7 @@ class PayPalClient:
                     f"Transaction {txn_id} on invoice {invoice_id} is missing amount value"
                 )
             try:
-                cents = _parse_money_to_cents(val, txn_curr_norm)
+                cents = _parse_money_to_minor_units(val, txn_curr_norm)
             except ValueError as exc:
                 raise PayPalAccountingError(
                     f"Transaction {txn_id} on invoice {invoice_id} has invalid monetary value {val!r}: {exc}"
@@ -1193,8 +1197,8 @@ class PayPalClient:
                             f"PayPal due_amount currency '{due_dict['currency_code']}' does not match "
                             f"invoice currency '{inv_curr}'"
                         )
-                total_cents = _parse_money_to_cents(amount_dict["value"], inv_curr)
-                due_cents = _parse_money_to_cents(due_dict["value"], inv_curr)
+                total_cents = _parse_money_to_minor_units(amount_dict["value"], inv_curr)
+                due_cents = _parse_money_to_minor_units(due_dict["value"], inv_curr)
                 paid_diff = total_cents - due_cents
                 if paid_diff > 0:
                     if due_cents > 0:
@@ -1236,8 +1240,8 @@ class PayPalClient:
                         f"PayPal due_amount currency '{due_dict['currency_code']}' does not match "
                         f"invoice currency '{inv_curr}'"
                     )
-            total_cents = _parse_money_to_cents(amount_dict["value"], inv_curr)
-            due_cents = _parse_money_to_cents(due_dict["value"], inv_curr)
+            total_cents = _parse_money_to_minor_units(amount_dict["value"], inv_curr)
+            due_cents = _parse_money_to_minor_units(due_dict["value"], inv_curr)
             sum_allocs = sum(a.amount_cents for a in allocations)
             expected_due = total_cents - sum_allocs
             if due_cents != expected_due:
