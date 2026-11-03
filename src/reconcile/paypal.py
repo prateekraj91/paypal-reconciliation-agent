@@ -7,17 +7,18 @@ Tokens and credentials are never logged or exposed.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 import sys
 import time
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Iterator, Mapping, Optional, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
 
+from .delivery import PaymentConflictError, resolve_delivery
 from .interfaces import InvoiceSource
 from .money import (
     UnsupportedCurrencyError,
@@ -29,7 +30,9 @@ from .models import (
     AllocationStatus,
     Invoice,
     InvoiceStatus,
+    Payment,
     PaymentAllocation,
+    PaymentStatus,
     deduplicate_allocations,
 )
 
@@ -74,6 +77,95 @@ class PayPalPaginationError(PayPalError):
     payment against an invoice that was never listed is reported UNMATCHED,
     which reads as a clean answer rather than a missing one.
     """
+
+
+# Documented limits and behaviour for GET /v1/reporting/transactions.
+MAX_TRANSACTION_WINDOW_DAYS = 31
+# PayPal states that a transaction may take up to three hours to appear in
+# Transaction Search. Reading right up to "now" therefore returns a window that
+# is still filling, and a sync that trusted it would skip those transactions
+# permanently. Every sync end is pulled back by this much.
+TRANSACTION_APPEARANCE_DELAY_HOURS = 3
+DEFAULT_TRANSACTION_OVERLAP = timedelta(hours=6)
+MAX_TRANSACTION_PAGE_SIZE = 500
+DEFAULT_TRANSACTION_PAGE_SIZE = 500
+DEFAULT_TRANSACTION_RETRIES = 3
+MAX_BACKOFF_SECONDS = 30.0
+
+# PayPal's single-letter transaction status codes. An unlisted code is a
+# fail-closed condition: guessing COMPLETED would let an unknown state be
+# matched and allocated.
+TRANSACTION_STATUS_MAP: Mapping[str, PaymentStatus] = {
+    "S": PaymentStatus.COMPLETED,   # Success
+    "P": PaymentStatus.PENDING,     # Pending
+    "D": PaymentStatus.DENIED,      # Denied
+    "V": PaymentStatus.REVERSED,    # Reversed
+}
+
+# HTTP statuses worth trying again. 4xx other than 429 will not fix itself.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def sync_windows(
+    start: datetime,
+    end: datetime,
+    window: timedelta = timedelta(days=MAX_TRANSACTION_WINDOW_DAYS),
+    overlap: timedelta = DEFAULT_TRANSACTION_OVERLAP,
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Split [start, end] into overlapping windows within the API's limit.
+
+    Transaction Search refuses a range wider than 31 days, so a longer sync has
+    to be chunked. Consecutive windows overlap rather than abut: a transaction
+    whose timestamp sits exactly on a boundary, or which is backdated slightly
+    as it settles, would otherwise fall between two syncs and never be seen.
+    Overlap costs a duplicate read, which deduplication by transaction id makes
+    free, and that trade is the right way round.
+    """
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("sync windows require timezone-aware datetimes")
+    if end < start:
+        raise ValueError(f"end {end.isoformat()} precedes start {start.isoformat()}")
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    if overlap < timedelta(0):
+        raise ValueError("overlap cannot be negative")
+    if overlap >= window:
+        raise ValueError(
+            f"overlap {overlap} must be smaller than the window {window}, "
+            f"otherwise the walk cannot advance"
+        )
+
+    windows: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + window, end)
+        windows.append((cursor, stop))
+        if stop >= end:
+            break
+        cursor = stop - overlap
+    if not windows:
+        windows.append((start, end))
+    return tuple(windows)
+
+
+@dataclass(frozen=True)
+class TransactionIngest:
+    """Canonical payments from Transaction Search, with their source evidence.
+
+    `skipped` records every transaction that was deliberately not turned into a
+    payment, with the reason. Fees, refunds and balance transfers are not
+    payments received, but they are not silently dropped either: an operator
+    needs to be able to see what was excluded and why.
+    """
+
+    payments: tuple[Payment, ...] = ()
+    raw_by_id: Mapping[str, dict[str, Any]] = field(default_factory=dict)
+    skipped: tuple[tuple[str, str], ...] = ()
+    windows: tuple[tuple[datetime, datetime], ...] = ()
+
+    @property
+    def transaction_count(self) -> int:
+        return len(self.raw_by_id)
 
 
 # Documented limits for GET /v2/invoicing/invoices.
@@ -124,6 +216,24 @@ def _load_dotenv(filepath: str = ".env") -> dict[str, str]:
     except OSError:
         pass
     return env
+
+
+def _parse_rfc3339(value: Any, context: str) -> datetime:
+    """Parse a PayPal RFC 3339 timestamp into an aware UTC datetime."""
+    if not value or not str(value).strip():
+        raise PayPalAccountingError(
+            f"Transaction {context} has no usable timestamp"
+        )
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise PayPalAccountingError(
+            f"Transaction {context} has an unparseable timestamp {value!r}: {exc}"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _invoice_currency(item: dict[str, Any]) -> str:
@@ -215,6 +325,8 @@ class PayPalClient:
 
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
+        # Injectable so tests exercise the backoff schedule without waiting.
+        self._sleep = time.sleep
 
     def __repr__(self) -> str:
         masked_id = f"{self.client_id[:4]}***" if len(self.client_id) >= 4 else "***"
@@ -304,7 +416,14 @@ class PayPalClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8")
-                return json.loads(body) if body else {}
+            if not body:
+                return {}
+            try:
+                return json.loads(body)
+            except ValueError as exc:
+                raise PayPalAPIError(
+                    0, f"malformed JSON in response to {path}: {exc}"
+                ) from exc
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
             if exc.code == 401:
@@ -520,6 +639,314 @@ class PayPalClient:
         """Fetch an individual invoice and map it into an Invoice model."""
         raw = self.get_raw_invoice(invoice_id)
         return self.map_invoice(raw)
+
+    # ----------------------------------------------------------------------
+    # Retrying transport for read-only endpoints
+    # ----------------------------------------------------------------------
+
+    def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        query: Optional[dict[str, Any]] = None,
+        retries: int = DEFAULT_TRANSACTION_RETRIES,
+    ) -> dict[str, Any]:
+        """GET with bounded exponential backoff on transient failures.
+
+        Retries 429 and 5xx and timeouts, because those are the ones that go
+        away on their own. A 400 or a 404 will not fix itself, so retrying only
+        burns rate-limit budget and delays the error.
+
+        A 401 is handled separately and exactly once: the cached token is
+        dropped and the request is replayed with a fresh one. Repeating that
+        would turn a revoked credential into an authentication storm, so a
+        second 401 is raised.
+        """
+        if method != "GET":
+            raise ValueError("only GET requests are retried")
+        if retries < 0:
+            raise ValueError(f"retries must be >= 0, got {retries}")
+
+        refreshed = False
+        attempt = 0
+
+        while True:
+            try:
+                return self._request(method, path, query=query)
+            except PayPalAuthError:
+                if refreshed:
+                    raise
+                # Controlled, single re-authentication. _request already
+                # cleared the cached token when it saw the 401.
+                refreshed = True
+                self._access_token = None
+                self._token_expires_at = 0.0
+                continue
+            except (PayPalAPIError, PayPalTimeoutError) as exc:
+                retryable = isinstance(exc, PayPalTimeoutError) or (
+                    getattr(exc, "status_code", None) in RETRYABLE_STATUSES
+                )
+                if not retryable or attempt >= retries:
+                    raise
+                delay = min(2.0 ** attempt, MAX_BACKOFF_SECONDS)
+                self._sleep(delay)
+                attempt += 1
+
+    # ----------------------------------------------------------------------
+    # Transaction Search (GET /v1/reporting/transactions)
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _format_search_timestamp(moment: datetime) -> str:
+        """PayPal's Transaction Search wants an RFC 3339 timestamp in UTC."""
+        return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S-0000")
+
+    def search_raw_transactions(
+        self,
+        start: datetime,
+        end: datetime,
+        page: int = 1,
+        page_size: int = DEFAULT_TRANSACTION_PAGE_SIZE,
+        retries: int = DEFAULT_TRANSACTION_RETRIES,
+    ) -> dict[str, Any]:
+        """One raw page of Transaction Search for one window.
+
+        `fields=all` is required to get payer_info and the reference fields;
+        the default response carries transaction_info only.
+        """
+        return self._request_with_retry(
+            "GET",
+            "/v1/reporting/transactions",
+            query={
+                "start_date": self._format_search_timestamp(start),
+                "end_date": self._format_search_timestamp(end),
+                "fields": "all",
+                "page": page,
+                "page_size": min(page_size, MAX_TRANSACTION_PAGE_SIZE),
+            },
+            retries=retries,
+        )
+
+    def iter_raw_transactions(
+        self,
+        start: datetime,
+        end: datetime,
+        page_size: int = DEFAULT_TRANSACTION_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        retries: int = DEFAULT_TRANSACTION_RETRIES,
+    ) -> "Iterator[dict[str, Any]]":
+        """Yield every raw transaction in one window, across all its pages."""
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        if max_pages < 1:
+            raise ValueError(f"max_pages must be >= 1, got {max_pages}")
+
+        effective = min(page_size, MAX_TRANSACTION_PAGE_SIZE)
+
+        for page in range(1, max_pages + 1):
+            data = self.search_raw_transactions(
+                start, end, page=page, page_size=effective, retries=retries
+            )
+            details = data.get("transaction_details")
+            if details is None:
+                details = []
+            if not isinstance(details, list):
+                raise PayPalAPIError(
+                    0,
+                    "malformed Transaction Search response: transaction_details "
+                    f"is {type(details).__name__}, expected a list",
+                )
+
+            for item in details:
+                yield item
+
+            if len(details) < effective:
+                return
+            total_pages = _usable_count(data.get("total_pages"))
+            if total_pages is not None and page >= total_pages:
+                return
+
+        raise PayPalPaginationError(
+            f"Transaction Search exceeded max_pages={max_pages} for window "
+            f"{start.isoformat()}..{end.isoformat()}; refusing to return a "
+            f"partial dataset"
+        )
+
+    def map_transaction(self, item: dict[str, Any]) -> Optional[Payment]:
+        """Map one raw Transaction Search record onto a canonical Payment.
+
+        Returns None when the record is not a payment received (a fee, refund
+        or transfer, which carry a non-positive amount). The caller records
+        those as skipped rather than discarding them unseen.
+
+        Reference handling is deliberately narrow. `invoice_id` is PayPal's own
+        structured link to an invoice, so it becomes Payment.reference.
+        `custom_field`, `transaction_subject` and `transaction_note` are free
+        text that merchants and payers put anything into, so they become
+        Payment.note, where the matcher may extract a reference only if it
+        matches a known invoice number. Promoting them to `reference` would be
+        inventing a reference from an unrelated field.
+        """
+        info = item.get("transaction_info") or {}
+
+        txn_id = info.get("transaction_id")
+        if not txn_id or not str(txn_id).strip():
+            raise PayPalAccountingError(
+                "Transaction Search returned a record without a transaction_id; "
+                "it cannot be identified or deduplicated"
+            )
+        txn_id = str(txn_id).strip()
+
+        amount = info.get("transaction_amount") or {}
+        raw_currency = amount.get("currency_code")
+        if not raw_currency or not str(raw_currency).strip():
+            raise PayPalAccountingError(
+                f"Transaction {txn_id} has no currency_code; its amount cannot "
+                f"be converted to minor units"
+            )
+        try:
+            currency = normalize_currency(raw_currency)
+        except ValueError as exc:
+            raise PayPalAccountingError(
+                f"Transaction {txn_id} has an unusable currency "
+                f"{raw_currency!r}: {exc}"
+            ) from exc
+
+        try:
+            minor_units = parse_money_to_minor_units(amount.get("value"), currency)
+        except ValueError as exc:
+            raise PayPalAccountingError(
+                f"Transaction {txn_id} has an invalid amount: {exc}"
+            ) from exc
+
+        if minor_units <= 0:
+            return None
+
+        raw_status = str(info.get("transaction_status", "")).strip().upper()
+        try:
+            status = TRANSACTION_STATUS_MAP[raw_status]
+        except KeyError:
+            raise PayPalAccountingError(
+                f"Transaction {txn_id} has unrecognised transaction_status "
+                f"{raw_status!r}; refusing to guess whether it completed"
+            ) from None
+
+        received_at = _parse_rfc3339(
+            info.get("transaction_initiation_date")
+            or info.get("transaction_updated_date"),
+            txn_id,
+        )
+
+        payer = item.get("payer_info") or {}
+        payer_name_block = payer.get("payer_name") or {}
+        payer_name = (
+            payer_name_block.get("alternate_full_name")
+            or payer_name_block.get("given_name")
+            or ""
+        )
+        payer_email = payer.get("email_address")
+
+        invoice_id = info.get("invoice_id")
+        reference = str(invoice_id).strip() if invoice_id and str(invoice_id).strip() else None
+
+        note_parts = [
+            str(info[key]).strip()
+            for key in ("custom_field", "transaction_subject", "transaction_note")
+            if info.get(key) and str(info[key]).strip()
+        ]
+
+        return Payment(
+            payment_id=txn_id,
+            amount_cents=minor_units,
+            currency=currency,
+            received_at=received_at,
+            payer_name=payer_name,
+            payer_email=payer_email,
+            reference=reference,
+            note=" | ".join(note_parts),
+            status=status,
+        )
+
+    def map_transactions(
+        self,
+        items: Sequence[dict[str, Any]],
+        windows: Sequence[tuple[datetime, datetime]] = (),
+    ) -> TransactionIngest:
+        """Map raw transactions into canonical payments, deduplicated by id.
+
+        The same transaction arriving twice (window overlap, or a retry) is
+        collapsed. Two records sharing an id but disagreeing about the money
+        fail closed through the canonical delivery resolver rather than one
+        silently winning.
+        """
+        raw_by_id: dict[str, dict[str, Any]] = {}
+        payments: dict[str, Payment] = {}
+        skipped: list[tuple[str, str]] = []
+
+        for item in items:
+            payment = self.map_transaction(item)
+            info = item.get("transaction_info") or {}
+            txn_id = str(info.get("transaction_id", "")).strip()
+
+            raw_by_id.setdefault(txn_id, item)
+
+            if payment is None:
+                amount = (info.get("transaction_amount") or {}).get("value")
+                if not any(t == txn_id for t, _ in skipped):
+                    skipped.append((
+                        txn_id,
+                        f"amount {amount} is not a positive payment received "
+                        f"(fee, refund or transfer)",
+                    ))
+                continue
+
+            existing = payments.get(txn_id)
+            if existing is None:
+                payments[txn_id] = payment
+                continue
+            try:
+                payments[txn_id] = resolve_delivery([existing, payment])
+            except PaymentConflictError as exc:
+                raise PayPalAccountingError(
+                    f"Transaction {txn_id} was returned twice with "
+                    f"contradictory data: {exc}"
+                ) from exc
+
+        return TransactionIngest(
+            payments=tuple(payments.values()),
+            raw_by_id=raw_by_id,
+            skipped=tuple(skipped),
+            windows=tuple(windows),
+        )
+
+    def list_transactions(
+        self,
+        start: datetime,
+        end: datetime,
+        page_size: int = DEFAULT_TRANSACTION_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        retries: int = DEFAULT_TRANSACTION_RETRIES,
+        overlap: timedelta = DEFAULT_TRANSACTION_OVERLAP,
+    ) -> TransactionIngest:
+        """Every transaction in [start, end], as canonical payments.
+
+        The range is split into overlapping windows inside the API's 31-day
+        limit, each window is paged to exhaustion, and the union is
+        deduplicated by transaction id.
+        """
+        windows = sync_windows(start, end, overlap=overlap)
+        raw: list[dict[str, Any]] = []
+        for w_start, w_end in windows:
+            raw.extend(
+                self.iter_raw_transactions(
+                    w_start,
+                    w_end,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    retries=retries,
+                )
+            )
+        return self.map_transactions(raw, windows=windows)
 
     # ----------------------------------------------------------------------
     # Domain Mapping & Ledger Reconciliation Support
