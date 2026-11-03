@@ -377,14 +377,17 @@ def test_timeout_error_handling():
 
 
 def test_parse_money_to_cents():
-    assert _parse_money_to_cents("25.00") == 2500
-    assert _parse_money_to_cents("25") == 2500
-    assert _parse_money_to_cents("0.01") == 1
-    assert _parse_money_to_cents("10.01") == 1001
-    assert _parse_money_to_cents(25) == 2500
-    assert _parse_money_to_cents(25.50) == 2550
+    """Same assertions as D1, now with the currency the scaling depends on."""
+    assert _parse_money_to_cents("25.00", "USD") == 2500
+    assert _parse_money_to_cents("25", "USD") == 2500
+    assert _parse_money_to_cents("0.01", "USD") == 1
+    assert _parse_money_to_cents("10.01", "USD") == 1001
+    assert _parse_money_to_cents(25, "USD") == 2500
+    assert _parse_money_to_cents(25.50, "USD") == 2550
+    # A zero-exponent currency is not scaled by 100.
+    assert _parse_money_to_cents("1000", "JPY") == 1000
     with pytest.raises(ValueError):
-        _parse_money_to_cents("invalid")
+        _parse_money_to_cents("invalid", "USD")
 
 
 # --------------------------------------------------------------------------
