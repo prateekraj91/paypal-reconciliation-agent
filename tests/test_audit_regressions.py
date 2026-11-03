@@ -6,19 +6,30 @@ kept together so the audit trail stays readable; the deeper unit coverage for
 the new abstractions lives in test_delivery.py and the existing modules.
 """
 
+from datetime import timedelta
+
 import pytest
 
-from factories import inv, pay
+from factories import T0, inv, pay
 
 from reconcile.baseline import BaselineMatcher
 from reconcile.dataset import Dataset
+from reconcile.delivery import (
+    IMMUTABLE_DELIVERY_FIELDS,
+    PaymentConflictError,
+    resolve_delivery,
+)
 from reconcile.deterministic import DeterministicMatcher
 from reconcile.interfaces import StaticSource
 from reconcile.models import (
     AccountingError,
     AllocationStatus,
+    Candidate,
+    Evidence,
     EvidenceCode,
+    InvoiceStatus,
     MatchOutcome,
+    MatchProposal,
     Payment,
     PaymentAllocation,
     PaymentStatus,
@@ -415,3 +426,332 @@ def test_f7_matcher_behaviour_is_unchanged_on_the_dataset():
     )
 
     assert (card.proposed, card.correct_auto, card.false_auto) == (54, 54, 0)
+
+
+# --------------------------------------------------------------------------
+# F2 follow-up: received_at must not block a legal transition (audit issue 1)
+# --------------------------------------------------------------------------
+
+
+def _at(payment, minutes, *, status):
+    """The same delivery observed at a different moment, with a given status."""
+    return Payment(
+        payment_id=payment.payment_id,
+        amount_cents=payment.amount_cents,
+        currency=payment.currency,
+        received_at=T0 + timedelta(minutes=minutes),
+        payer_name=payment.payer_name,
+        payer_email=payment.payer_email,
+        reference=payment.reference,
+        note=payment.note,
+        status=status,
+    )
+
+
+DIFFERENT_TIMESTAMP_CASES = [
+    (0, 5),      # PENDING first, COMPLETED five minutes later
+    (0, 1440),   # a full day later
+    (7, 9),      # neither at the epoch boundary
+]
+
+
+@pytest.mark.parametrize("pending_min,completed_min", DIFFERENT_TIMESTAMP_CASES)
+@pytest.mark.parametrize("order", ["pending_first", "completed_first"])
+def test_f2_received_at_never_blocks_a_pending_to_completed_transition(
+    pending_min, completed_min, order
+):
+    """Differing observation times are not a contradiction, in either order."""
+    base = pay(1, 50000, reference="INV-1001")
+    pending = _at(base, pending_min, status=PaymentStatus.PENDING)
+    completed = _at(base, completed_min, status=PaymentStatus.COMPLETED)
+
+    stream = [pending, completed] if order == "pending_first" else [completed, pending]
+
+    canonical = resolve_delivery(stream)
+    assert canonical.status is PaymentStatus.COMPLETED
+    assert canonical.received_at == T0 + timedelta(minutes=completed_min)
+
+    proposals = DeterministicMatcher().match(stream, [inv(1, 50000)])
+    proposed = [p for p in proposals if p.outcome is MatchOutcome.PROPOSED]
+    assert len(proposed) == 1
+
+    results = verify_proposals(proposed, stream, [inv(1, 50000)])
+    assert [r.passed for r in results] == [True], results[0].issues
+
+
+@pytest.mark.parametrize("pending_min,completed_min", DIFFERENT_TIMESTAMP_CASES)
+def test_f2_canonical_record_is_identical_under_both_orderings(
+    pending_min, completed_min
+):
+    base = pay(1, 50000, reference="INV-1001")
+    pending = _at(base, pending_min, status=PaymentStatus.PENDING)
+    completed = _at(base, completed_min, status=PaymentStatus.COMPLETED)
+
+    assert resolve_delivery([pending, completed]) == resolve_delivery(
+        [completed, pending]
+    )
+
+
+def test_f2_received_at_is_not_an_immutable_delivery_field():
+    """Pin the decision: observation time is resolved, not compared."""
+    assert "received_at" not in IMMUTABLE_DELIVERY_FIELDS
+    assert "status" not in IMMUTABLE_DELIVERY_FIELDS
+    assert set(IMMUTABLE_DELIVERY_FIELDS) == {
+        "amount_cents",
+        "currency",
+        "payer_name",
+        "payer_email",
+        "reference",
+        "note",
+    }
+
+
+def test_f2_canonical_timestamp_is_the_moment_completion_was_observed():
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 3, status=PaymentStatus.PENDING),
+        _at(base, 11, status=PaymentStatus.COMPLETED),
+        _at(base, 20, status=PaymentStatus.COMPLETED),
+    ]
+
+    canonical = resolve_delivery(stream)
+    assert canonical.status is PaymentStatus.COMPLETED
+    # Earliest COMPLETED observation, not the earliest or latest delivery.
+    assert canonical.received_at == T0 + timedelta(minutes=11)
+
+
+def test_f2_stale_pending_arriving_later_in_time_does_not_downgrade():
+    """A PENDING replay stamped AFTER the COMPLETED one must not win."""
+    base = pay(1, 50000, reference="INV-1001")
+    completed = _at(base, 5, status=PaymentStatus.COMPLETED)
+    stale_pending = _at(base, 60, status=PaymentStatus.PENDING)
+
+    for stream in ([completed, stale_pending], [stale_pending, completed]):
+        canonical = resolve_delivery(stream)
+        assert canonical.status is PaymentStatus.COMPLETED, stream
+        assert canonical.received_at == T0 + timedelta(minutes=5)
+
+        results = verify_proposals(
+            [p for p in DeterministicMatcher().match(stream, [inv(1, 50000)])
+             if p.outcome is MatchOutcome.PROPOSED],
+            stream,
+            [inv(1, 50000)],
+        )
+        assert [r.passed for r in results] == [True], (stream, results[0].issues)
+
+
+def test_f2_differing_timestamps_do_not_excuse_a_financial_conflict():
+    """received_at being free must not leak into the money fields."""
+    base = pay(1, 50000, reference="INV-1001")
+    pending = _at(base, 0, status=PaymentStatus.PENDING)
+    completed = Payment(
+        payment_id=base.payment_id,
+        amount_cents=70000,
+        currency=base.currency,
+        received_at=T0 + timedelta(minutes=5),
+        payer_name=base.payer_name,
+        reference=base.reference,
+        status=PaymentStatus.COMPLETED,
+    )
+
+    with pytest.raises(PaymentConflictError):
+        resolve_delivery([pending, completed])
+    with pytest.raises(PaymentConflictError):
+        resolve_delivery([completed, pending])
+
+
+# --------------------------------------------------------------------------
+# F2 follow-up: the verifier itself must canonicalize (audit issue 2)
+# --------------------------------------------------------------------------
+
+
+def _ref_proposal(payment, invoice, amount=None):
+    """A reference-backed PROPOSED proposal, built without any matcher."""
+    return MatchProposal(
+        payment_id=payment.payment_id,
+        outcome=MatchOutcome.PROPOSED,
+        candidates=(
+            Candidate(
+                (
+                    PaymentAllocation(
+                        payment.payment_id,
+                        invoice.invoice_id,
+                        amount if amount is not None else payment.amount_cents,
+                        currency=invoice.currency,
+                    ),
+                ),
+                (
+                    Evidence(
+                        EvidenceCode.REFERENCE_MATCH,
+                        f"reference = invoice {invoice.number}",
+                    ),
+                    Evidence(EvidenceCode.AMOUNT_EXACT, "exact"),
+                ),
+            ),
+        ),
+        matcher="test",
+    )
+
+
+def test_f2_verifier_canonicalizes_a_pending_then_completed_stream():
+    """Proven through verify_proposals, with no matcher involved."""
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.COMPLETED),
+    ]
+
+    result = verify_proposals([_ref_proposal(base, invoice)], stream, [invoice])[0]
+    assert result.passed, result.issues
+
+
+def test_f2_verifier_does_not_falsely_reject_identical_redeliveries():
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [base, _at(base, 0, status=PaymentStatus.COMPLETED)]
+
+    result = verify_proposals([_ref_proposal(base, invoice)], stream, [invoice])[0]
+    assert result.passed, result.issues
+
+
+def test_f2_verifier_rejects_a_proposal_whose_deliveries_conflict():
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    conflicting = Payment(
+        payment_id=base.payment_id,
+        amount_cents=base.amount_cents,
+        currency=base.currency,
+        received_at=base.received_at,
+        payer_name="Someone Else",
+        reference=base.reference,
+        status=PaymentStatus.COMPLETED,
+    )
+
+    result = verify_proposals(
+        [_ref_proposal(base, invoice)], [base, conflicting], [invoice]
+    )[0]
+    assert not result.passed
+    assert any("conflicting deliveries" in i for i in result.issues)
+
+
+def test_f2_verifier_rejects_a_fabricated_payment_record():
+    """A proposal for a payment_id that was never delivered cannot pass."""
+    invoice = inv(1, 50000)
+    delivered = pay(1, 50000, reference="INV-1001")
+    ghost = pay(2, 50000, reference="INV-1001")
+
+    result = verify_proposals([_ref_proposal(ghost, invoice)], [delivered], [invoice])[0]
+    assert not result.passed
+    assert any("payment record is missing" in i for i in result.issues)
+
+
+def test_f2_verifier_uses_the_canonical_status_not_the_first_delivery():
+    """A stream that never completes must not pass on its PENDING record."""
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.PENDING),
+    ]
+
+    result = verify_proposals([_ref_proposal(base, invoice)], stream, [invoice])[0]
+    assert not result.passed
+    assert any("COMPLETED" in i for i in result.issues)
+
+
+def test_f2_verifier_rejects_a_denied_canonical_status():
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.DENIED),
+    ]
+
+    result = verify_proposals([_ref_proposal(base, invoice)], stream, [invoice])[0]
+    assert not result.passed
+    assert any("COMPLETED" in i for i in result.issues)
+
+
+def test_f2_verifier_still_rejects_duplicate_proposals_after_canonicalization():
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.COMPLETED),
+    ]
+    twice = [_ref_proposal(base, invoice), _ref_proposal(base, invoice)]
+
+    results = verify_proposals(twice, stream, [invoice])
+    assert all(not r.passed for r in results)
+    assert all(
+        any("duplicate proposals" in i for i in r.issues) for r in results
+    )
+
+
+def test_f2_canonicalization_does_not_weaken_the_financial_invariants():
+    """Every independent check still fires on a canonicalized payment."""
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.COMPLETED),
+    ]
+
+    # Allocation total must equal the canonical payment amount.
+    invoice = inv(1, 50000)
+    short = verify_proposals(
+        [_ref_proposal(base, invoice, amount=40000)], stream, [invoice]
+    )[0]
+    assert not short.passed
+    assert any("does not equal payment amount" in i for i in short.issues)
+
+    # The invoice must be open.
+    closed = inv(1, 50000, status=InvoiceStatus.PAID)
+    assert not verify_proposals([_ref_proposal(base, closed)], stream, [closed])[0].passed
+
+    # Currency must agree.
+    eur = inv(1, 50000, currency="EUR")
+    eur_result = verify_proposals([_ref_proposal(base, eur)], stream, [eur])[0]
+    assert not eur_result.passed
+    assert any("currency mismatch" in i for i in eur_result.issues)
+
+    # The payment must not already be allocated in the ledger.
+    settled = PaymentAllocation(
+        base.payment_id, invoice.invoice_id, 50000,
+        AllocationStatus.APPROVED, currency="USD",
+    )
+    already = verify_proposals(
+        [_ref_proposal(base, invoice)], stream, [invoice], existing_allocations=[settled]
+    )[0]
+    assert not already.passed
+    assert any("already allocated" in i for i in already.issues)
+
+
+def test_f2_verifier_requires_reference_evidence_even_after_canonicalization():
+    """An amount-only proposal must not pass just because the stream resolved."""
+    invoice = inv(1, 50000)
+    base = pay(1, 50000, reference="INV-1001")
+    stream = [
+        _at(base, 0, status=PaymentStatus.PENDING),
+        _at(base, 5, status=PaymentStatus.COMPLETED),
+    ]
+    amount_only = MatchProposal(
+        payment_id=base.payment_id,
+        outcome=MatchOutcome.PROPOSED,
+        candidates=(
+            Candidate(
+                (
+                    PaymentAllocation(
+                        base.payment_id, invoice.invoice_id, 50000, currency="USD"
+                    ),
+                ),
+                (Evidence(EvidenceCode.AMOUNT_EXACT, "exact"),),
+            ),
+        ),
+        matcher="test",
+    )
+
+    result = verify_proposals([amount_only], stream, [invoice])[0]
+    assert not result.passed
+    assert any("trusted invoice reference" in i for i in result.issues)
