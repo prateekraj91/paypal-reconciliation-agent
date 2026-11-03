@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Mapping, Optional
 
+from .delivery import canonical_payments
 from .interfaces import StaticSource
 from .models import Invoice, InvoiceStatus, Payment, PaymentStatus
 
@@ -80,25 +81,13 @@ class Dataset:
 
     @property
     def unique_payments(self) -> tuple[Payment, ...]:
-        """Return canonical payment records, collapsing identical replays.
+        """Return canonical payment records, collapsing replayed deliveries.
 
-        Repeated deliveries with identical data are the same payment.
-        Conflicting records sharing an ID must fail closed.
+        Delegates to `delivery.canonical_payments`, so an identical retry and a
+        legal status transition (PENDING then COMPLETED) both collapse to one
+        record, while records that genuinely contradict each other fail closed.
         """
-        by_id: dict[str, Payment] = {}
-
-        for payment in self.payments:
-            previous = by_id.get(payment.payment_id)
-
-            if previous is None:
-                by_id[payment.payment_id] = payment
-            elif previous != payment:
-                raise ValueError(
-                    f"conflicting deliveries for payment ID "
-                    f"{payment.payment_id!r}"
-                )
-
-        return tuple(by_id.values())
+        return canonical_payments(self.payments)
 
 
 DEFAULT_MIX: dict[CaseCategory, int] = {

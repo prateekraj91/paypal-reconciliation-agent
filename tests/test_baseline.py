@@ -106,8 +106,8 @@ def test_non_unique_invoice_number_is_not_guessed():
 
 def test_only_approved_allocations_reduce_the_balance():
     invoice = inv(1, 100000)
-    approved = [PaymentAllocation("old", "inv_1", 40000, AllocationStatus.APPROVED)]
-    proposed_only = [PaymentAllocation("old", "inv_1", 40000, AllocationStatus.PROPOSED)]
+    approved = [PaymentAllocation("old", "inv_1", 40000, AllocationStatus.APPROVED, currency="USD")]
+    proposed_only = [PaymentAllocation("old", "inv_1", 40000, AllocationStatus.PROPOSED, currency="USD")]
     remainder = pay(1, 60000, reference="INV-1001")
     assert M.match([remainder], [invoice], approved)[0].outcome is O.PROPOSED
     assert M.match([remainder], [invoice], proposed_only)[0].outcome is O.NO_MATCH

@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Sequence
 
+from .delivery import resolve_delivery_stream
 from .models import (
     AllocationStatus,
     EvidenceCode,
@@ -44,11 +45,16 @@ def verify_proposals(
 
     Results are returned in the same order as `proposals`.
 
+    `payments` is the delivery stream and may repeat a payment_id (webhook
+    retries, and PENDING followed by COMPLETED). It is resolved to one
+    canonical record per payment before anything is checked; deliveries that
+    contradict each other are reported as issues rather than matched.
+
     `existing_allocations` represents ledger allocations. Only APPROVED
     allocations reduce outstanding balances. Conflicting proposals in this
     batch are all rejected if, together, they would exceed invoice capacity.
     """
-    payment_counts = Counter(p.payment_id for p in payments)
+    deliveries = resolve_delivery_stream(payments)
     proposal_counts = Counter(p.payment_id for p in proposals)
     invoices_by_id: dict[str, list[Invoice]] = defaultdict(list)
 
@@ -59,12 +65,6 @@ def verify_proposals(
         normalized_number = canonical_reference(invoice.number)
         if normalized_number:
             invoices_by_number[normalized_number].append(invoice)
-
-    payments_by_id = {
-        payment.payment_id: payment
-        for payment in payments
-        if payment_counts[payment.payment_id] == 1
-    }
 
     approved_allocations = [
         allocation
@@ -93,13 +93,18 @@ def verify_proposals(
             issues.append("a proposal must contain exactly one candidate")
             continue
 
-        if payment_counts[proposal.payment_id] != 1:
+        conflict = deliveries.conflict_reason(proposal.payment_id)
+        if conflict is not None:
             issues.append(
-                "payment record is missing or has duplicate payment IDs"
+                f"conflicting deliveries for payment ID "
+                f"{proposal.payment_id!r}: {conflict}"
             )
             continue
 
-        payment = payments_by_id[proposal.payment_id]
+        payment = deliveries.get(proposal.payment_id)
+        if payment is None:
+            issues.append("payment record is missing")
+            continue
 
         if payment.status is not PaymentStatus.COMPLETED:
             issues.append("payment status must be COMPLETED")

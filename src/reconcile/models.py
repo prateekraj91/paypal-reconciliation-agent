@@ -19,7 +19,7 @@ allocations reduce an invoice's outstanding balance.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import Enum
 from typing import Iterable, Optional
@@ -334,9 +334,12 @@ def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]
 
     Proposed and rejected allocations never count. Repeated allocations for the
     same payment on this invoice are counted only once to prevent duplicate deductions.
-    When an allocation supplies a currency, it must match the invoice currency; a mismatch
-    raises AccountingError. For legacy allocations where currency is None, backward compatibility
-    is preserved (it does not prove a match, but is allowed for existing callers and tests).
+    An APPROVED allocation must state its currency and it must match the invoice
+    currency; a mismatch raises AccountingError, and so does a missing currency.
+    A currency-less allocation is never assumed to be in the invoice's currency,
+    because that assumption is how cross-currency money quietly goes missing.
+    Legacy records without a currency are brought forward through the one
+    explicit migration path, `migrate_allocation_currency`.
     A negative result means the ledger over-allocated the invoice; callers should treat that
     as a bug, so it is deliberately not clamped to zero.
     """
@@ -345,7 +348,14 @@ def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]
     inv_curr = invoice.currency.strip().upper()
     for a in allocations:
         if a.invoice_id == invoice.invoice_id and a.status is AllocationStatus.APPROVED:
-            if a.currency is not None and a.currency.strip().upper() != inv_curr:
+            if a.currency is None:
+                raise AccountingError(
+                    f"Missing currency for approved allocation {a.payment_id!r} on invoice "
+                    f"{invoice.invoice_id!r}: a currency-less allocation cannot be proven to be "
+                    f"in the invoice currency {inv_curr}. Migrate legacy records explicitly with "
+                    f"migrate_allocation_currency()."
+                )
+            if a.currency.strip().upper() != inv_curr:
                 raise AccountingError(
                     f"Currency mismatch for allocation {a.payment_id!r} on invoice {invoice.invoice_id!r}: "
                     f"allocation currency {a.currency.strip().upper()} does not match invoice currency {inv_curr}"
@@ -360,6 +370,60 @@ def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]
             seen_payments[a.payment_id] = a.amount_cents
             approved += a.amount_cents
     return invoice.amount_cents - approved
+
+
+def migrate_allocation_currency(
+    allocations: Iterable[PaymentAllocation],
+    invoices: Iterable[Invoice],
+) -> list[PaymentAllocation]:
+    """The one explicit migration path for legacy currency-less allocations.
+
+    Stamps each currency-less allocation with the currency of the invoice it is
+    recorded against, so the record states what it has always meant instead of
+    leaving later readers to assume it. Nothing is defaulted or guessed:
+
+    * an allocation whose invoice is not in `invoices` raises AccountingError,
+    * an allocation whose own currency contradicts its invoice raises
+      AccountingError rather than being overwritten,
+    * two invoice records sharing an id but not a currency raise
+      AccountingError, since neither can be trusted as the source.
+
+    Allocations that already carry the right currency are returned unchanged.
+    Call this at the boundary where legacy data enters, never inside an
+    accounting calculation.
+    """
+    currency_by_invoice: dict[str, str] = {}
+    for invoice in invoices:
+        currency = invoice.currency.strip().upper()
+        existing = currency_by_invoice.setdefault(invoice.invoice_id, currency)
+        if existing != currency:
+            raise AccountingError(
+                f"Invoice {invoice.invoice_id!r} appears with conflicting currencies "
+                f"{existing} and {currency}; cannot migrate allocations against it"
+            )
+
+    migrated: list[PaymentAllocation] = []
+    for allocation in allocations:
+        invoice_currency = currency_by_invoice.get(allocation.invoice_id)
+        if invoice_currency is None:
+            raise AccountingError(
+                f"Cannot migrate allocation {allocation.payment_id!r}: invoice "
+                f"{allocation.invoice_id!r} is unknown, so its currency cannot be established"
+            )
+
+        if allocation.currency is None:
+            migrated.append(replace(allocation, currency=invoice_currency))
+            continue
+
+        if allocation.currency.strip().upper() != invoice_currency:
+            raise AccountingError(
+                f"Cannot migrate allocation {allocation.payment_id!r}: allocation currency "
+                f"{allocation.currency} contradicts invoice currency {invoice_currency}"
+            )
+
+        migrated.append(allocation)
+
+    return migrated
 
 
 def cross_check_invoice_balance(invoice: Invoice, allocations: Iterable[PaymentAllocation]) -> int:

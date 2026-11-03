@@ -2,6 +2,17 @@
 
 from .baseline import BaselineConfig, BaselineMatcher
 from .dataset import CaseCategory, Dataset, GroundTruth, Resolution, generate_dataset
+from .delivery import (
+    IMMUTABLE_DELIVERY_FIELDS,
+    PAYMENT_STATUS_TRANSITIONS,
+    DeliveryResolution,
+    PaymentConflictError,
+    advances_to,
+    canonical_payments,
+    resolve_delivery,
+    resolve_delivery_stream,
+    resolve_payment_status,
+)
 from .deterministic import DeterministicMatcher
 from .interfaces import (
     InvoiceAllocationSource,
@@ -10,6 +21,7 @@ from .interfaces import (
     PaymentSource,
     StaticSource,
 )
+from .matching import MatchRun
 from .models import (
     AccountingError,
     AllocationStatus,
@@ -26,6 +38,7 @@ from .models import (
     ReconciliationStatus,
     cross_check_invoice_balance,
     deduplicate_allocations,
+    migrate_allocation_currency,
     outstanding_cents,
 )
 from .scoring import Scorecard, format_scorecard, score

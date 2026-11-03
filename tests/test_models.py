@@ -6,12 +6,13 @@ from reconcile.models import (
     AccountingError,
     AllocationStatus, Candidate, Evidence, EvidenceCode, Invoice, InvoiceStatus, MatchOutcome,
     MatchProposal, PaymentAllocation, ReconciliationStatus, cross_check_invoice_balance,
-    deduplicate_allocations, outstanding_cents,
+    deduplicate_allocations, migrate_allocation_currency, outstanding_cents,
 )
 
 
-def alloc(payment="pay_1", invoice="inv_1", amount=100, status=AllocationStatus.PROPOSED):
-    return PaymentAllocation(payment, invoice, amount, status)
+def alloc(payment="pay_1", invoice="inv_1", amount=100, status=AllocationStatus.PROPOSED,
+          currency="USD"):
+    return PaymentAllocation(payment, invoice, amount, status, currency=currency)
 
 
 def test_rejects_non_positive_money():
@@ -305,12 +306,20 @@ def test_outstanding_cents_mismatching_currency_usd_eur_fails_closed():
     assert "currency mismatch" in str(exc_info.value).lower()
 
 
-def test_outstanding_cents_legacy_allocations_none_currency_preserved():
-    """Legacy allocations where currency is None remain allowed for backward compatibility.
+def test_outstanding_cents_legacy_allocations_none_currency_fails_closed():
+    """A currency-less APPROVED allocation must never silently reduce a balance.
 
-    Missing currency does NOT prove a match, but preserves compatibility for existing callers.
+    Missing currency does not prove a match, so it is refused rather than
+    assumed to be the invoice currency. Legacy records come forward through the
+    one explicit migration path.
     """
     i = inv(1, 5000)  # USD
     a_legacy = PaymentAllocation("pay_1", i.invoice_id, 2000, AllocationStatus.APPROVED, currency=None)
     assert a_legacy.currency is None
-    assert outstanding_cents(i, [a_legacy]) == 3000
+
+    with pytest.raises(AccountingError):
+        outstanding_cents(i, [a_legacy])
+
+    migrated = migrate_allocation_currency([a_legacy], [i])
+    assert migrated[0].currency == "USD"
+    assert outstanding_cents(i, migrated) == 3000
