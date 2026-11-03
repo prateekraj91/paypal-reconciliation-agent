@@ -37,6 +37,7 @@ from reconcile.paypal import (
     PayPalNotFoundError,
     PayPalTimeoutError,
     _parse_money_to_cents,
+    _parse_money_to_minor_units,
 )
 from factories import pay
 
@@ -388,6 +389,15 @@ def test_parse_money_to_cents():
     assert _parse_money_to_cents("1000", "JPY") == 1000
     with pytest.raises(ValueError):
         _parse_money_to_cents("invalid", "USD")
+
+
+def test_parse_money_to_minor_units():
+    """Verify renamed helper works across zero, two, and three decimal currencies."""
+    assert _parse_money_to_minor_units("25.00", "USD") == 2500
+    assert _parse_money_to_minor_units("100.50", "INR") == 10050
+    assert _parse_money_to_minor_units("1000", "JPY") == 1000
+    assert _parse_money_to_minor_units("1.500", "BHD") == 1500
+    assert _parse_money_to_minor_units is _parse_money_to_cents
 
 
 # --------------------------------------------------------------------------

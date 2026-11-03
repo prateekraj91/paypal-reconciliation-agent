@@ -97,6 +97,9 @@ def parse_money_to_minor_units(value: Any, currency: Optional[str]) -> int:
     if not text:
         raise ValueError("cannot parse a monetary amount from an empty string")
 
+    if "e" in text.lower():
+        raise ValueError(f"invalid monetary value: {value!r}")
+
     try:
         amount = Decimal(text)
     except (InvalidOperation, ValueError, ArithmeticError) as exc:
