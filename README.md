@@ -6,19 +6,27 @@ This milestone has no FastAPI, SQLite, React, PayPal SDK, or AI. Standard librar
 ## Run
 
     pip install pytest
-    python -m pytest -q                 # 37 tests
-    PYTHONPATH=src python -m reconcile  # baseline scorecards on the synthetic dataset
+    python -m pytest -q                 # 271 tests
+    PYTHONPATH=src python -m reconcile  # matcher scorecards on the synthetic dataset
     PYTHONPATH=src python -m reconcile 7   # same, different seed
+    PYTHONPATH=src python -m reconcile --paypal  # PayPal invoice INGESTION only
 
 ## Layout
 
     src/reconcile/
-      models.py      Invoice, Payment, PaymentAllocation, MatchProposal, the three state enums
-      interfaces.py  InvoiceSource, PaymentSource, Matcher protocols + StaticSource
-      normalize.py   canonical_reference()
-      baseline.py    exact reference + exact amount matcher (proposals only)
-      dataset.py     seeded synthetic data with ground truth
-      scoring.py     precision, recall, false auto-matches, review queue
+      models.py        Invoice, Payment, PaymentAllocation, MatchProposal, the three state enums
+                       plus ledger arithmetic and migrate_allocation_currency()
+      interfaces.py    InvoiceSource, PaymentSource, Matcher protocols + StaticSource
+      normalize.py     canonical_reference(), extract_invoice_references()
+      delivery.py      canonical record per payment_id: status transitions, fail-closed conflicts
+      matching.py      MatchRun, the per-run state every matcher shares
+      baseline.py      exact reference + exact amount matcher (proposals only)
+      deterministic.py reference-in-free-text, partial and grouped payments (proposals only)
+      verifier.py      independent re-check of proposals; approves nothing
+      workflow.py      ingestion -> matching -> verification for one batch
+      paypal.py        PayPal Invoicing API v2 adapter (invoices only; no payment source yet)
+      dataset.py       seeded synthetic data with ground truth
+      scoring.py       precision, recall, false auto-matches, review queue
     tests/
 
 ## Three separate states

@@ -5,14 +5,36 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
-_NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
+_SEPARATOR_RUN = re.compile(r"[^A-Za-z0-9]+")
+_DIGITS = frozenset("0123456789")
+
+# Stands in for a separator that sat between two digits. It is not alphanumeric,
+# so it can never be produced by the rest of a reference, which keeps two
+# different invoice numbers from collapsing onto the same canonical key.
+_DIGIT_BOUNDARY = "."
 
 
 def canonical_reference(value: Optional[str]) -> str:
-    """Normalize case, spaces, hyphens and punctuation in a reference."""
+    """Normalize case, spaces, hyphens and punctuation in a reference.
+
+    Separators are dropped so that INV-1001, INV 1001, inv_1001 and INV1001 all
+    canonicalise to INV1001. A separator *between two digits* is kept as a
+    boundary marker instead: merging those digit runs would make the amount
+    'INV 10.01' indistinguishable from invoice 'INV-1001', and an invoice
+    genuinely numbered 'INV-2026-01' indistinguishable from 'INV-202601'.
+    """
     if not value:
         return ""
-    return _NON_ALNUM.sub("", value).upper()
+
+    def replace(match: re.Match[str]) -> str:
+        start, end = match.span()
+        before = value[start - 1] if start > 0 else ""
+        after = value[end] if end < len(value) else ""
+        if before in _DIGITS and after in _DIGITS:
+            return _DIGIT_BOUNDARY
+        return ""
+
+    return _SEPARATOR_RUN.sub(replace, value).upper()
 
 
 def extract_invoice_references(

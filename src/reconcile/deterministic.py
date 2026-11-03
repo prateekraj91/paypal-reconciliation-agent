@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
 
-from .baseline import BaselineConfig, BaselineMatcher, _Run
+from .baseline import BaselineConfig, BaselineMatcher
+from .matching import MatchRun
 from .models import (
     AllocationStatus,
     Candidate,
@@ -16,7 +16,6 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
-    PaymentStatus,
 )
 from .normalize import canonical_reference, extract_invoice_references
 
@@ -50,39 +49,12 @@ class DeterministicMatcher(BaselineMatcher):
             name="deterministic-v1",
         )
 
-    def _match_one(self, p: Payment, run: _Run) -> MatchProposal:
-        # 1. Reject already approved payments, duplicate deliveries, and uncompleted payments.
-        if p.payment_id in run.approved_payment_ids:
-            return self._no_match(
-                p,
-                Evidence(
-                    EvidenceCode.DUPLICATE_EVENT,
-                    f"payment {p.payment_id} is already approved in the ledger",
-                ),
-            )
-
-        if p.payment_id in run.seen:
-            prev_status = run.seen[p.payment_id]
-            if prev_status is PaymentStatus.PENDING and p.status is PaymentStatus.COMPLETED:
-                pass
-            else:
-                return self._no_match(
-                    p,
-                    Evidence(
-                        EvidenceCode.DUPLICATE_EVENT,
-                        f"payment {p.payment_id} was already processed",
-                    ),
-                )
-        run.seen[p.payment_id] = p.status
-
-        if p.status is not PaymentStatus.COMPLETED:
-            return self._no_match(
-                p,
-                Evidence(
-                    EvidenceCode.PAYMENT_NOT_COMPLETED,
-                    f"payment status is {p.status.value}",
-                ),
-            )
+    def _match_one(self, p: Payment, run: MatchRun) -> MatchProposal:
+        # 1. Reject already approved payments, replayed or contradictory
+        #    deliveries, and payments PayPal has not completed.
+        blocker = self.screen_delivery(p, run)
+        if blocker is not None:
+            return self.no_match(p, blocker)
 
         invoice_numbers = [invoice.number for invoice in run.invoices]
         known_canonicals = {_normalize_ref(num): num for num in invoice_numbers}
@@ -101,7 +73,7 @@ class DeterministicMatcher(BaselineMatcher):
             for seg in segments:
                 extracted = extract_invoice_references([seg], invoice_numbers)
                 if not extracted:
-                    return self._no_match(
+                    return self.no_match(
                         p,
                         Evidence(
                             EvidenceCode.REFERENCE_UNKNOWN,
@@ -111,7 +83,7 @@ class DeterministicMatcher(BaselineMatcher):
                 for num in extracted:
                     canon = _normalize_ref(num)
                     if canon in seen_in_ref:
-                        return self._no_match(
+                        return self.no_match(
                             p,
                             Evidence(
                                 EvidenceCode.MULTIPLE_CANDIDATES,
@@ -128,7 +100,7 @@ class DeterministicMatcher(BaselineMatcher):
             for match in pattern_matches:
                 canon = _normalize_ref(match.group(0))
                 if canon not in known_canonicals:
-                    return self._no_match(
+                    return self.no_match(
                         p,
                         Evidence(
                             EvidenceCode.REFERENCE_UNKNOWN,
@@ -140,7 +112,7 @@ class DeterministicMatcher(BaselineMatcher):
             if pattern_matches:
                 match_canons = [_normalize_ref(m.group(0)) for m in pattern_matches]
                 if len(match_canons) != len(set(match_canons)):
-                    return self._no_match(
+                    return self.no_match(
                         p,
                         Evidence(
                             EvidenceCode.MULTIPLE_CANDIDATES,
@@ -161,7 +133,7 @@ class DeterministicMatcher(BaselineMatcher):
 
         # 3. No amount-only matching in this matcher
         if not all_hits:
-            return self._no_match(
+            return self.no_match(
                 p,
                 Evidence(
                     EvidenceCode.REFERENCE_ABSENT,
@@ -175,7 +147,7 @@ class DeterministicMatcher(BaselineMatcher):
         for ref in all_hits:
             hits = run.by_ref.get(canonical_reference(ref), [])
             if not hits:
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.REFERENCE_UNKNOWN,
@@ -183,7 +155,7 @@ class DeterministicMatcher(BaselineMatcher):
                     ),
                 )
             if len(hits) > 1:
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.MULTIPLE_CANDIDATES,
@@ -193,7 +165,7 @@ class DeterministicMatcher(BaselineMatcher):
             matched_invoices.append(hits[0])
 
         if len({inv.invoice_id for inv in matched_invoices}) != len(matched_invoices):
-            return self._no_match(
+            return self.no_match(
                 p,
                 Evidence(
                     EvidenceCode.MULTIPLE_CANDIDATES,
@@ -204,9 +176,9 @@ class DeterministicMatcher(BaselineMatcher):
         # 4. Single invoice matching (exact or partial)
         if len(matched_invoices) == 1:
             invoice = matched_invoices[0]
-            blockers = self._partial_blockers(p, invoice, run)
+            blockers = run.blockers(p, invoice, allow_partial=True)
             if blockers:
-                return self._no_match(p, *blockers)
+                return self.no_match(p, *blockers)
 
             source = (
                 "reference field"
@@ -240,7 +212,7 @@ class DeterministicMatcher(BaselineMatcher):
         # 5. Grouped payment matching across multiple invoices
         for inv in matched_invoices:
             if inv.currency.upper() != p.currency.upper():
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.CURRENCY_MISMATCH,
@@ -248,7 +220,7 @@ class DeterministicMatcher(BaselineMatcher):
                     ),
                 )
             if not inv.is_open:
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.INVOICE_NOT_OPEN,
@@ -256,7 +228,7 @@ class DeterministicMatcher(BaselineMatcher):
                     ),
                 )
             if inv.invoice_id in run.claimed:
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.INVOICE_ALREADY_CLAIMED,
@@ -264,7 +236,7 @@ class DeterministicMatcher(BaselineMatcher):
                     ),
                 )
             if run.outstanding[inv.invoice_id] <= 0:
-                return self._no_match(
+                return self.no_match(
                     p,
                     Evidence(
                         EvidenceCode.AMOUNT_MISMATCH,
@@ -276,7 +248,7 @@ class DeterministicMatcher(BaselineMatcher):
             run.outstanding[inv.invoice_id] for inv in matched_invoices
         )
         if p.amount_cents != total_outstanding:
-            return self._no_match(
+            return self.no_match(
                 p,
                 Evidence(
                     EvidenceCode.AMOUNT_MISMATCH,
@@ -320,39 +292,3 @@ class DeterministicMatcher(BaselineMatcher):
             reasons=(),
             matcher=self.name,
         )
-
-    # ------------------------------------------------------------------
-    # Blocker logic: relaxed to allow partial payments
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _partial_blockers(p: Payment, inv: Invoice, run: _Run) -> list[Evidence]:
-        """Like _Run.blockers but allows payment ≤ outstanding (partial payments).
-
-        The baseline's blockers() requires payment == outstanding (exact match).
-        Here we only reject if the payment exceeds the outstanding balance, or
-        if other hard constraints (currency, status, already-claimed) fail.
-        """
-        out: list[Evidence] = []
-        if inv.currency != p.currency:
-            out.append(Evidence(EvidenceCode.CURRENCY_MISMATCH, f"{p.currency} payment vs {inv.currency} invoice"))
-        if not inv.is_open:
-            out.append(Evidence(EvidenceCode.INVOICE_NOT_OPEN, f"invoice {inv.number} is {inv.status.value}"))
-        if inv.invoice_id in run.claimed:
-            out.append(
-                Evidence(
-                    EvidenceCode.INVOICE_ALREADY_CLAIMED,
-                    f"invoice {inv.number} already proposed for payment {run.claimed[inv.invoice_id]}",
-                )
-            )
-        outstanding = run.outstanding[inv.invoice_id]
-        if p.amount_cents > outstanding:
-            out.append(
-                Evidence(
-                    EvidenceCode.AMOUNT_MISMATCH,
-                    f"payment {p.amount_cents} exceeds outstanding {outstanding} on {inv.number}",
-                )
-            )
-        return out
-
-

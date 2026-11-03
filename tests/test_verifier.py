@@ -34,6 +34,7 @@ def allocation(payment, invoice, amount):
         payment_id=payment.payment_id,
         invoice_id=invoice.invoice_id,
         amount_cents=amount,
+        currency=invoice.currency,
     )
 
 
@@ -146,6 +147,7 @@ def test_allocation_cannot_exceed_remaining_invoice_balance():
         invoice_id=invoice.invoice_id,
         amount_cents=30000,
         status=AllocationStatus.APPROVED,
+        currency=invoice.currency,
     )
 
     result = verify(proposal, payment, [invoice], [prior_payment])
@@ -219,6 +221,7 @@ def test_previously_approved_payment_cannot_be_allocated_again():
         invoice_id=invoice.invoice_id,
         amount_cents=50000,
         status=AllocationStatus.APPROVED,
+        currency=invoice.currency,
     )
 
     result = verify(proposal, payment, [invoice], [previous])
@@ -304,6 +307,7 @@ def test_verifier_passes_when_due_amount_matches_approved_allocations():
         invoice_id=invoice.invoice_id,
         amount_cents=20000,
         status=AllocationStatus.APPROVED,
+        currency=invoice.currency,
     )
     proposal = make_proposal(payment, [allocation(payment, invoice, 30000)])
 

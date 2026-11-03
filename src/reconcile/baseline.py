@@ -6,7 +6,9 @@ carrying its evidence; nothing is approved and no balance changes.
 
 Rules, in order, per delivered payment (processed chronologically):
 
-1. Repeated payment_id            -> NO_MATCH (DUPLICATE_EVENT)
+1. Replayed or contradictory delivery -> NO_MATCH (DUPLICATE_EVENT). A PENDING
+   delivery later redelivered as COMPLETED is a status transition, not a
+   duplicate, and is matched on the COMPLETED delivery.
 2. Payment not COMPLETED          -> NO_MATCH (PAYMENT_NOT_COMPLETED)
 3. Reference field present        -> look the invoice up by canonical number.
    Unknown / ambiguous reference, or an invoice that is closed, in another
@@ -21,8 +23,8 @@ Rules, in order, per delivered payment (processed chronologically):
 Known blind spots, on purpose: partial payments, one payment covering several
 invoices, invoice numbers buried in free text, payer-name reasoning.
 
-Duplicate handling lives here only because the baseline is the first matcher.
-Once webhook ingestion exists, dedupe belongs there (idempotent handling).
+Deciding what the canonical record for a payment_id is belongs to
+`delivery.py`; this matcher only asks it whether a delivery may be matched.
 """
 
 from __future__ import annotations
@@ -30,8 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from .matching import MatchRun
 from .models import (
-    AllocationStatus,
     Candidate,
     Evidence,
     EvidenceCode,
@@ -41,8 +43,6 @@ from .models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
-    cross_check_invoice_balance,
-    outstanding_cents,
 )
 from .normalize import canonical_reference
 
@@ -65,50 +65,56 @@ class BaselineMatcher:
         invoices: Sequence[Invoice],
         approved: Sequence[PaymentAllocation] = (),
     ) -> list[MatchProposal]:
-        run = _Run(list(invoices), approved)
+        run = MatchRun(invoices, approved)
         ordered = sorted(payments, key=lambda p: (p.received_at, p.payment_id))
         return [self._match_one(p, run) for p in ordered]
 
     # ------------------------------------------------------------------
 
-    def _match_one(self, p: Payment, run: "_Run") -> MatchProposal:
+    def screen_delivery(self, p: Payment, run: MatchRun) -> Optional[Evidence]:
+        """Blocking evidence for a delivery that must not be matched at all.
+
+        Shared by every matcher built on this one, so the rules for ledger
+        duplicates, replayed deliveries, canonical status transitions and
+        uncompleted payments are decided in exactly one place.
+        """
         if p.payment_id in run.approved_payment_ids:
-            return self._no_match(
-                p,
-                Evidence(
-                    EvidenceCode.DUPLICATE_EVENT,
-                    f"payment {p.payment_id} is already approved in the ledger",
-                ),
+            return Evidence(
+                EvidenceCode.DUPLICATE_EVENT,
+                f"payment {p.payment_id} is already approved in the ledger",
             )
 
-        if p.payment_id in run.seen:
-            prev_status = run.seen[p.payment_id]
-            if prev_status is PaymentStatus.PENDING and p.status is PaymentStatus.COMPLETED:
-                pass
-            else:
-                return self._no_match(
-                    p, Evidence(EvidenceCode.DUPLICATE_EVENT, f"payment {p.payment_id} already processed")
-                )
-        run.seen[p.payment_id] = p.status
+        replay = run.record_delivery(p)
+        if replay is not None:
+            return replay
 
-        if p.status is not PaymentStatus.COMPLETED:
-            return self._no_match(
-                p, Evidence(EvidenceCode.PAYMENT_NOT_COMPLETED, f"payment status is {p.status.value}")
+        canonical = run.seen[p.payment_id]
+        if canonical.status is not PaymentStatus.COMPLETED:
+            return Evidence(
+                EvidenceCode.PAYMENT_NOT_COMPLETED,
+                f"payment status is {canonical.status.value}",
             )
+
+        return None
+
+    def _match_one(self, p: Payment, run: MatchRun) -> MatchProposal:
+        blocker = self.screen_delivery(p, run)
+        if blocker is not None:
+            return self.no_match(p, blocker)
 
         ref = canonical_reference(p.reference)
         if ref:
             return self._match_by_reference(p, ref, run)
         return self._match_by_amount(p, run)
 
-    def _match_by_reference(self, p: Payment, ref: str, run: "_Run") -> MatchProposal:
+    def _match_by_reference(self, p: Payment, ref: str, run: MatchRun) -> MatchProposal:
         hits = run.by_ref.get(ref, [])
         if not hits:
-            return self._no_match(
+            return self.no_match(
                 p, Evidence(EvidenceCode.REFERENCE_UNKNOWN, f"no invoice numbered {p.reference!r}")
             )
         if len(hits) > 1:
-            return self._no_match(
+            return self.no_match(
                 p,
                 Evidence(
                     EvidenceCode.MULTIPLE_CANDIDATES,
@@ -118,16 +124,16 @@ class BaselineMatcher:
         inv = hits[0]
         blockers = run.blockers(p, inv)
         if blockers:
-            return self._no_match(p, *blockers)
+            return self.no_match(p, *blockers)
         evidence = (
             Evidence(EvidenceCode.REFERENCE_MATCH, f"reference {p.reference!r} = invoice {inv.number}"),
             Evidence(EvidenceCode.AMOUNT_EXACT, f"{p.amount_cents} cents equals outstanding balance"),
         )
         return self._proposed(p, inv, run, evidence)
 
-    def _match_by_amount(self, p: Payment, run: "_Run") -> MatchProposal:
+    def _match_by_amount(self, p: Payment, run: MatchRun) -> MatchProposal:
         if not self.config.allow_amount_only:
-            return self._no_match(
+            return self.no_match(
                 p, Evidence(EvidenceCode.REFERENCE_ABSENT, "no reference and amount-only matching is off")
             )
         same_amount = [
@@ -138,12 +144,12 @@ class BaselineMatcher:
             and run.outstanding[inv.invoice_id] == p.amount_cents
         ]
         if not same_amount:
-            return self._no_match(
+            return self.no_match(
                 p, Evidence(EvidenceCode.NO_CANDIDATE, "no open invoice with this outstanding amount")
             )
         free = [inv for inv in same_amount if inv.invoice_id not in run.claimed]
         if not free:
-            return self._no_match(
+            return self.no_match(
                 p,
                 Evidence(
                     EvidenceCode.INVOICE_ALREADY_CLAIMED,
@@ -183,7 +189,7 @@ class BaselineMatcher:
     # ------------------------------------------------------------------
 
     def _proposed(
-        self, p: Payment, inv: Invoice, run: "_Run", evidence: tuple[Evidence, ...]
+        self, p: Payment, inv: Invoice, run: MatchRun, evidence: tuple[Evidence, ...]
     ) -> MatchProposal:
         run.claimed[inv.invoice_id] = p.payment_id
         cand = Candidate(
@@ -199,45 +205,5 @@ class BaselineMatcher:
         )
         return MatchProposal(p.payment_id, MatchOutcome.PROPOSED, (cand,), (), self.name)
 
-    def _no_match(self, p: Payment, *reasons: Evidence) -> MatchProposal:
+    def no_match(self, p: Payment, *reasons: Evidence) -> MatchProposal:
         return MatchProposal(p.payment_id, MatchOutcome.NO_MATCH, (), tuple(reasons), self.name)
-
-
-class _Run:
-    """Per-call working state. Proposals reserve invoices within one run so
-    two payments cannot both be proposed against the same invoice."""
-
-    def __init__(self, invoices: list[Invoice], approved: Sequence[PaymentAllocation]):
-        self.invoices = invoices
-        self.outstanding = {i.invoice_id: cross_check_invoice_balance(i, approved) for i in invoices}
-        self.by_ref: dict[str, list[Invoice]] = {}
-        for inv in invoices:
-            self.by_ref.setdefault(canonical_reference(inv.number), []).append(inv)
-        self.claimed: dict[str, str] = {}  # invoice_id -> payment_id holding the proposal
-        self.seen: dict[str, PaymentStatus] = {}
-        self.approved_payment_ids: set[str] = {
-            a.payment_id for a in approved if a.status is AllocationStatus.APPROVED
-        }
-
-    def blockers(self, p: Payment, inv: Invoice) -> list[Evidence]:
-        out: list[Evidence] = []
-        if inv.currency != p.currency:
-            out.append(Evidence(EvidenceCode.CURRENCY_MISMATCH, f"{p.currency} payment vs {inv.currency} invoice"))
-        if not inv.is_open:
-            out.append(Evidence(EvidenceCode.INVOICE_NOT_OPEN, f"invoice {inv.number} is {inv.status.value}"))
-        if inv.invoice_id in self.claimed:
-            out.append(
-                Evidence(
-                    EvidenceCode.INVOICE_ALREADY_CLAIMED,
-                    f"invoice {inv.number} already proposed for payment {self.claimed[inv.invoice_id]}",
-                )
-            )
-        outstanding = self.outstanding[inv.invoice_id]
-        if outstanding != p.amount_cents:
-            out.append(
-                Evidence(
-                    EvidenceCode.AMOUNT_MISMATCH,
-                    f"payment {p.amount_cents} vs outstanding {outstanding} on {inv.number}",
-                )
-            )
-        return out

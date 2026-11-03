@@ -148,7 +148,7 @@ def test_second_payment_covers_remainder_after_approval():
     rejected as a duplicate or blocked by the first proposal."""
     invoice = inv(1, 100000)  # $1000
     # First payment is already APPROVED in the ledger (simulating post-approval).
-    approved = [PaymentAllocation("pay_1", "inv_1", 40000, AllocationStatus.APPROVED)]
+    approved = [PaymentAllocation("pay_1", "inv_1", 40000, AllocationStatus.APPROVED, currency="USD")]
     second = pay(2, 60000, reference="INV-1001", minutes=10)  # $600 remainder
 
     [proposal] = M.match([second], [invoice], approved=approved)
@@ -163,7 +163,7 @@ def test_partial_payment_exceeding_outstanding_is_rejected():
     """A payment larger than the outstanding balance must be rejected, even with
     a valid reference."""
     invoice = inv(1, 100000)
-    approved = [PaymentAllocation("pay_1", "inv_1", 80000, AllocationStatus.APPROVED)]
+    approved = [PaymentAllocation("pay_1", "inv_1", 80000, AllocationStatus.APPROVED, currency="USD")]
     over = pay(2, 30000, reference="INV-1001", minutes=5)  # 30k > 20k remaining
 
     [proposal] = M.match([over], [invoice], approved=approved)
@@ -477,6 +477,7 @@ def test_matcher_succeeds_when_due_amount_matches_approved_allocations():
         invoice_id=invoice.invoice_id,
         amount_cents=20000,
         status=AllocationStatus.APPROVED,
+        currency="USD",
     )
     payment = pay(2, 30000, reference="INV-1001")
 
@@ -497,6 +498,7 @@ def test_grouped_payment_with_previous_approved_allocation():
         invoice_id=inv_1.invoice_id,
         amount_cents=20000,
         status=AllocationStatus.APPROVED,
+        currency="USD",
     )
 
     # Total remaining: inv_1 has 10000, inv_2 has 20000 -> 30000
