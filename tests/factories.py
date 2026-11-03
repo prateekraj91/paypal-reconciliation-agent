@@ -7,7 +7,7 @@ from reconcile.models import Invoice, InvoiceStatus, Payment, PaymentStatus
 T0 = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
 
-def inv(n, amount, *, customer="Acme Studio", status=InvoiceStatus.SENT, currency="USD", number=None):
+def inv(n, amount, *, customer="Acme Studio", status=InvoiceStatus.SENT, currency="USD", number=None, due_amount_cents=None):
     return Invoice(
         invoice_id=f"inv_{n}",
         number=number or f"INV-{1000 + n}",
@@ -17,6 +17,7 @@ def inv(n, amount, *, customer="Acme Studio", status=InvoiceStatus.SENT, currenc
         issued_on=date(2026, 8, 1),
         due_on=date(2026, 8, 31),
         status=status,
+        due_amount_cents=due_amount_cents,
     )
 
 

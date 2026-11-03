@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Mapping, Optional
 
+from .delivery import canonical_payments
 from .interfaces import StaticSource
 from .models import Invoice, InvoiceStatus, Payment, PaymentStatus
 
@@ -77,6 +78,16 @@ class Dataset:
     @property
     def unique_payment_count(self) -> int:
         return len({p.payment_id for p in self.payments})
+
+    @property
+    def unique_payments(self) -> tuple[Payment, ...]:
+        """Return canonical payment records, collapsing replayed deliveries.
+
+        Delegates to `delivery.canonical_payments`, so an identical retry and a
+        legal status transition (PENDING then COMPLETED) both collapse to one
+        record, while records that genuinely contradict each other fail closed.
+        """
+        return canonical_payments(self.payments)
 
 
 DEFAULT_MIX: dict[CaseCategory, int] = {
