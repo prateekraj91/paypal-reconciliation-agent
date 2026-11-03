@@ -1,0 +1,131 @@
+{
+  "amount": {
+    "breakdown": {
+      "discount": {
+        "invoice_discount": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "0.00"
+          }
+        },
+        "item_discount": {
+          "currency_code": "USD",
+          "value": "0.00"
+        }
+      },
+      "item_total": {
+        "currency_code": "USD",
+        "value": "300.00"
+      },
+      "tax_total": {
+        "currency_code": "USD",
+        "value": "0.00"
+      }
+    },
+    "currency_code": "USD",
+    "value": "300.00"
+  },
+  "configuration": {
+    "allow_only_pay_by_bank": false,
+    "allow_tip": false,
+    "allow_vba_payments": false,
+    "save_item_for_future": true,
+    "tax_calculated_after_discount": false,
+    "tax_inclusive": false,
+    "template_id": "TEMP-1X164905WD877670M"
+  },
+  "detail": {
+    "archived": false,
+    "category_code": "SHIPPABLE",
+    "currency_code": "USD",
+    "group_draft": false,
+    "invoice_date": "2026-11-02",
+    "invoice_number": "RECON-T-005",
+    "metadata": {
+      "caller_type": "API_V2_INVOICE",
+      "create_time": "2026-11-03T07:27:12Z",
+      "created_by_flow": "REGULAR_SINGLE",
+      "invoicer_view_url": "https://www.sandbox.paypal.com/invoice/details/INV2-JPQ3-X68E-56X6-Y8KT",
+      "last_update_time": "2026-11-03T07:32:36Z",
+      "recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#JPQ3X68E56X6Y8KT",
+      "spam_info": {}
+    },
+    "note": "Reconciliation test scenario: partial-payment",
+    "payment_term": {
+      "due_date": "2026-12-02",
+      "term_type": "NET_30"
+    },
+    "viewed_by_recipient": false
+  },
+  "due_amount": {
+    "currency_code": "USD",
+    "value": "100.00"
+  },
+  "id": "INV2-JPQ3-X68E-56X6-Y8KT",
+  "invoicer": {
+    "business_name": "Reconciliation Sandbox Merchant"
+  },
+  "items": [
+    {
+      "id": "ITEM-5UJ802469G857221J",
+      "name": "<redacted>",
+      "quantity": "1",
+      "unit_amount": {
+        "currency_code": "USD",
+        "value": "300.00"
+      }
+    }
+  ],
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT/payments",
+      "method": "POST",
+      "rel": "record-payment"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT/refunds",
+      "method": "POST",
+      "rel": "record-refund"
+    }
+  ],
+  "payments": {
+    "paid_amount": {
+      "currency_code": "USD",
+      "value": "200.00"
+    },
+    "transactions": [
+      {
+        "amount": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "method": "BANK_TRANSFER",
+        "note": "Recorded by the reconciliation sandbox seeder",
+        "payment_date": "2026-11-03",
+        "payment_date_time": "2026-11-03T00:00:00Z",
+        "payment_id": "EXTR-37W93490R8038490C",
+        "type": "EXTERNAL"
+      },
+      {
+        "amount": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "method": "BANK_TRANSFER",
+        "note": "Recorded by the reconciliation sandbox seeder",
+        "payment_date": "2026-11-03",
+        "payment_date_time": "2026-11-03T00:00:00Z",
+        "payment_id": "EXTR-1TR74015LJ715830B",
+        "type": "EXTERNAL"
+      }
+    ]
+  },
+  "settings": {},
+  "status": "PARTIALLY_PAID",
+  "unilateral": false
+}
