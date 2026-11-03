@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,6 +65,38 @@ class PayPalTimeoutError(PayPalError):
 
 class PayPalAccountingError(PayPalError, AccountingError):
     """Raised when PayPal due_amount contradicts transaction records or accounting invariants."""
+
+
+class PayPalPaginationError(PayPalError):
+    """Raised when a paginated fetch cannot be shown to be complete.
+
+    Returning a prefix of the invoice list is worse than returning nothing: a
+    payment against an invoice that was never listed is reported UNMATCHED,
+    which reads as a clean answer rather than a missing one.
+    """
+
+
+# Documented limits for GET /v2/invoicing/invoices.
+MAX_INVOICE_PAGE_SIZE = 100
+DEFAULT_INVOICE_PAGE_SIZE = 100
+
+# Hard stop on the page walk. At the documented maximum page size this covers
+# 100k invoices, far past anything this system should be ingesting in one pass,
+# so hitting it means the API is misbehaving and we must not keep going.
+DEFAULT_MAX_PAGES = 1000
+
+
+def _usable_count(value: Any) -> Optional[int]:
+    """A non-negative int from pagination metadata, or None if unusable.
+
+    PayPal normally sends sound values, but metadata is not something to stake
+    completeness on: a string, a float, a negative or a bool is ignored rather
+    than trusted or allowed to abort the walk. bool is excluded deliberately,
+    since True would otherwise read as 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
 
 
 def _parse_money_to_cents(value: Any, currency: str) -> int:
@@ -345,6 +377,138 @@ class PayPalClient:
             raw_allocations, error_cls=PayPalAccountingError
         )
         return invoices, deduped_allocs
+
+    # ------------------------------------------------------------------
+    # Complete pagination
+    # ------------------------------------------------------------------
+
+    def iter_raw_invoice_pages(
+        self,
+        page_size: int = DEFAULT_INVOICE_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> "Iterator[dict[str, Any]]":
+        """Yield every raw invoice page, in page order.
+
+        Stops when a page comes back short or empty, or when the API's own
+        total_pages says there is no more. Raises PayPalPaginationError rather
+        than stopping quietly if the walk exceeds `max_pages`. Any transport or
+        API failure propagates: a half-read list is not a result.
+        """
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        if max_pages < 1:
+            raise ValueError(f"max_pages must be >= 1, got {max_pages}")
+
+        effective = min(page_size, MAX_INVOICE_PAGE_SIZE)
+
+        for page in range(1, max_pages + 1):
+            data = self.list_raw_invoices(
+                page=page, page_size=effective, total_required=True
+            )
+            yield data
+
+            items = data.get("items") or []
+            if len(items) < effective:
+                return
+
+            total_pages = _usable_count(data.get("total_pages"))
+            if total_pages is not None and page >= total_pages:
+                return
+
+        raise PayPalPaginationError(
+            f"invoice pagination exceeded max_pages={max_pages} at page_size="
+            f"{effective}; refusing to continue or to return a partial dataset"
+        )
+
+    def list_all_raw_invoices(
+        self,
+        page_size: int = DEFAULT_INVOICE_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Every raw invoice across all pages, deduplicated by PayPal id.
+
+        Ordering is page order then within-page order, which is what PayPal
+        returns and is stable across runs. Duplicates across page boundaries
+        are dropped (they happen when records shift between requests), but a
+        whole page of nothing but duplicates means the cursor is not advancing,
+        and that fails closed instead of looping.
+        """
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        reported_total: Optional[int] = None
+
+        for data in self.iter_raw_invoice_pages(
+            page_size=page_size, max_pages=max_pages
+        ):
+            if reported_total is None:
+                reported_total = _usable_count(data.get("total_items"))
+
+            items = data.get("items") or []
+            fresh = 0
+            for item in items:
+                invoice_id = item.get("id")
+                if not invoice_id:
+                    raise PayPalAccountingError(
+                        "PayPal invoice listing returned an item without an 'id'; "
+                        "it cannot be identified or deduplicated"
+                    )
+                if invoice_id in seen:
+                    continue
+                seen.add(invoice_id)
+                collected.append(item)
+                fresh += 1
+
+            if items and fresh == 0:
+                raise PayPalPaginationError(
+                    f"page returned {len(items)} invoice(s), all duplicates of "
+                    f"records already collected; the pagination cursor is not "
+                    f"advancing, so the fetch cannot be shown to be complete"
+                )
+
+        if reported_total is not None and len(collected) != reported_total:
+            raise PayPalPaginationError(
+                f"incomplete invoice fetch: collected {len(collected)} invoice(s) "
+                f"but PayPal reported total_items={reported_total}"
+            )
+
+        return collected
+
+    def list_all_invoices(
+        self,
+        page_size: int = DEFAULT_INVOICE_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> list[Invoice]:
+        """Every invoice in the account, mapped into Invoice models."""
+        return [
+            self.map_invoice(item)
+            for item in self.list_all_raw_invoices(
+                page_size=page_size, max_pages=max_pages
+            )
+        ]
+
+    def list_all_invoices_with_allocations(
+        self,
+        page_size: int = DEFAULT_INVOICE_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+    ) -> tuple[list[Invoice], list[PaymentAllocation]]:
+        """Every invoice plus its PayPal-linked allocations, across all pages.
+
+        The paginated counterpart of list_invoices_with_allocations. Allocations
+        are deduplicated on the compound (payment_id, invoice_id) key, so a
+        payment PayPal has already linked is never counted twice.
+        """
+        raw = self.list_all_raw_invoices(page_size=page_size, max_pages=max_pages)
+
+        invoices: list[Invoice] = []
+        raw_allocations: list[PaymentAllocation] = []
+        for item in raw:
+            invoices.append(self.map_invoice(item))
+            raw_allocations.extend(self.extract_linked_allocations(item))
+
+        allocations = deduplicate_allocations(
+            raw_allocations, error_cls=PayPalAccountingError
+        )
+        return invoices, allocations
 
     def get_raw_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Fetch raw JSON representation of an individual invoice."""
