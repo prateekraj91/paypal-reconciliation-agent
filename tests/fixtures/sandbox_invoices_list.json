@@ -1,0 +1,457 @@
+{
+  "items": [
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "95.00"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-008",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:14Z"
+        },
+        "note": "Reconciliation test scenario: open-grouped-candidate",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "95.00"
+      },
+      "id": "INV2-LQ9U-ATQA-3C9H-499K",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LQ9U-ATQA-3C9H-499K/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "JPY",
+        "value": "1000"
+      },
+      "detail": {
+        "currency_code": "JPY",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-007",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:13Z"
+        },
+        "note": "Reconciliation test scenario: zero-exponent-currency",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "JPY",
+        "value": "1000"
+      },
+      "id": "INV2-LP92-83TW-LAWD-8DDE",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LP92-83TW-LAWD-8DDE/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "300.00"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-005",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:12Z"
+        },
+        "note": "Reconciliation test scenario: partial-payment",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "100.00"
+      },
+      "id": "INV2-JPQ3-X68E-56X6-Y8KT",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-JPQ3-X68E-56X6-Y8KT/refunds",
+          "method": "POST",
+          "rel": "record-refund"
+        }
+      ],
+      "payments": {
+        "paid_amount": {
+          "currency_code": "USD",
+          "value": "200.00"
+        }
+      },
+      "status": "PARTIALLY_PAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "180.00"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-006",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:12Z"
+        },
+        "note": "Reconciliation test scenario: external-payment-settled",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "0.00"
+      },
+      "id": "INV2-6LKK-HF7L-ZCE8-85VW",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-6LKK-HF7L-ZCE8-85VW",
+          "method": "GET",
+          "rel": "self"
+        }
+      ],
+      "payments": {
+        "paid_amount": {
+          "currency_code": "USD",
+          "value": "180.00"
+        }
+      },
+      "status": "MARKED_AS_PAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "75.50"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-004",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:10Z"
+        },
+        "note": "Reconciliation test scenario: ambiguous-same-amount",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "75.50"
+      },
+      "id": "INV2-ABLB-8EMM-LVM8-8X5B",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-ABLB-8EMM-LVM8-8X5B/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "75.50"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-003",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:09Z"
+        },
+        "note": "Reconciliation test scenario: ambiguous-same-amount",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "75.50"
+      },
+      "id": "INV2-FLRW-EHT6-PPVA-3S87",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-FLRW-EHT6-PPVA-3S87/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "250.00"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-002",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:08Z"
+        },
+        "note": "Reconciliation test scenario: open-exact-reference",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "250.00"
+      },
+      "id": "INV2-YVAJ-6999-MMWX-PCSL",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-YVAJ-6999-MMWX-PCSL/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    },
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "125.00"
+      },
+      "detail": {
+        "currency_code": "USD",
+        "group_draft": false,
+        "invoice_date": "2026-11-02",
+        "invoice_number": "RECON-T-001",
+        "metadata": {
+          "create_time": "2026-11-03T07:27:05Z"
+        },
+        "note": "Reconciliation test scenario: open-exact-reference",
+        "payment_term": {
+          "due_date": "2026-12-02"
+        },
+        "viewed_by_recipient": false
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "125.00"
+      },
+      "id": "INV2-9MS4-52NH-EWQF-YLXL",
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL",
+          "method": "GET",
+          "rel": "self"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL",
+          "method": "PUT",
+          "rel": "replace"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL/cancel",
+          "method": "POST",
+          "rel": "cancel"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL/remind",
+          "method": "POST",
+          "rel": "remind"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL/payments",
+          "method": "POST",
+          "rel": "record-payment"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-9MS4-52NH-EWQF-YLXL/generate-qr-code",
+          "method": "GET",
+          "rel": "qr-code"
+        }
+      ],
+      "status": "UNPAID",
+      "unilateral": false
+    }
+  ],
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices?page=1&page_size=100&total_required=true",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "total_items": 8,
+  "total_pages": 1
+}

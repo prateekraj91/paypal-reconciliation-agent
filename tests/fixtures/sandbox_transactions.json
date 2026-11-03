@@ -1,0 +1,53 @@
+{
+  "account_number": "<redacted>",
+  "end_date": "2026-11-03T02:59:59Z",
+  "last_refreshed_datetime": "2026-11-03T02:59:59Z",
+  "links": [
+    {
+      "encType": "application/json",
+      "href": "https://api.sandbox.paypal.com/v1/reporting/transactions?start_date=2026-10-03T04%3A34%3A42-0000&end_date=2026-11-03T04%3A34%3A42-0000&fields=all&page_size=100&page=1",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "page": 1,
+  "start_date": "2026-10-03T04:34:42Z",
+  "total_items": 1,
+  "total_pages": 1,
+  "transaction_details": [
+    {
+      "auction_info": {},
+      "cart_info": {},
+      "incentive_info": {},
+      "payer_info": {
+        "address_status": "N",
+        "payer_name": {}
+      },
+      "shipping_info": {},
+      "store_info": {},
+      "transaction_info": {
+        "available_balance": {
+          "currency_code": "USD",
+          "value": "5000.00"
+        },
+        "ending_balance": {
+          "currency_code": "USD",
+          "value": "5000.00"
+        },
+        "instrument_sub_type": "PayPal Wallet",
+        "instrument_type": "PayPal",
+        "protection_eligibility": "02",
+        "transaction_amount": {
+          "currency_code": "USD",
+          "value": "5000.00"
+        },
+        "transaction_event_code": "T1900",
+        "transaction_id": "6FD489545X6067634",
+        "transaction_initiation_date": "2026-10-29T05:06:59Z",
+        "transaction_status": "S",
+        "transaction_subject": "Initial balance",
+        "transaction_updated_date": "2026-10-29T05:06:59Z"
+      }
+    }
+  ]
+}

@@ -266,6 +266,9 @@ def _invoice_currency(item: dict[str, Any]) -> str:
 _STATUS_MAP: dict[str, InvoiceStatus] = {
     "DRAFT": InvoiceStatus.DRAFT,
     "SENT": InvoiceStatus.SENT,
+    # PayPal reports a sent, unpaid invoice as UNPAID. Observed live; relying
+    # on the default fallback for a real status is how a mapping bug hides.
+    "UNPAID": InvoiceStatus.SENT,
     "SCHEDULED": InvoiceStatus.SENT,
     "PAYMENT_PENDING": InvoiceStatus.SENT,
     "PARTIALLY_PAID": InvoiceStatus.PARTIALLY_PAID,
@@ -605,22 +608,70 @@ class PayPalClient:
             )
         ]
 
+    @staticmethod
+    def needs_payment_provenance(item: dict[str, Any]) -> bool:
+        """True when this listed invoice shows money paid but not where from.
+
+        The listing endpoint returns `payments.paid_amount` but omits
+        `payments.transactions`; only the per-invoice endpoint carries them.
+        Verified against the live Sandbox. Without the transactions the
+        accounting guard cannot establish provenance for a partial payment and
+        correctly refuses to infer it, so those invoices have to be fetched
+        individually. Invoices with nothing paid need no extra request.
+        """
+        payments = item.get("payments") or {}
+        if payments.get("transactions"):
+            return False
+
+        amount = item.get("amount") or {}
+        due = item.get("due_amount") or {}
+        if "value" not in amount or "value" not in due:
+            return False
+
+        try:
+            currency = _invoice_currency(item)
+            total = parse_money_to_minor_units(amount["value"], currency)
+            outstanding = parse_money_to_minor_units(due["value"], currency)
+        except (PayPalError, ValueError):
+            # A malformed invoice is the accounting guard's problem to report,
+            # not something to paper over with an extra request.
+            return False
+
+        return total > outstanding
+
+    def hydrate_invoice(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Replace a listed invoice with its fuller per-invoice representation."""
+        invoice_id = item.get("id")
+        if not invoice_id:
+            raise PayPalAccountingError(
+                "cannot fetch provenance for an invoice without an 'id'"
+            )
+        return self.get_raw_invoice(str(invoice_id))
+
     def list_all_invoices_with_allocations(
         self,
         page_size: int = DEFAULT_INVOICE_PAGE_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
+        hydrate: bool = True,
     ) -> tuple[list[Invoice], list[PaymentAllocation]]:
         """Every invoice plus its PayPal-linked allocations, across all pages.
 
         The paginated counterpart of list_invoices_with_allocations. Allocations
         are deduplicated on the compound (payment_id, invoice_id) key, so a
         payment PayPal has already linked is never counted twice.
+
+        With `hydrate` (the default), any invoice whose listing shows money paid
+        but carries no transactions is refetched individually to get its payment
+        provenance. Pass hydrate=False to see exactly what the listing alone
+        supports; a partially paid invoice will then fail closed.
         """
         raw = self.list_all_raw_invoices(page_size=page_size, max_pages=max_pages)
 
         invoices: list[Invoice] = []
         raw_allocations: list[PaymentAllocation] = []
         for item in raw:
+            if hydrate and self.needs_payment_provenance(item):
+                item = self.hydrate_invoice(item)
             invoices.append(self.map_invoice(item))
             raw_allocations.extend(self.extract_linked_allocations(item))
 

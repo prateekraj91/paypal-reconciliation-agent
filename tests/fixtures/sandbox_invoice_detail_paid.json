@@ -1,0 +1,109 @@
+{
+  "amount": {
+    "breakdown": {
+      "discount": {
+        "invoice_discount": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "0.00"
+          }
+        },
+        "item_discount": {
+          "currency_code": "USD",
+          "value": "0.00"
+        }
+      },
+      "item_total": {
+        "currency_code": "USD",
+        "value": "180.00"
+      },
+      "tax_total": {
+        "currency_code": "USD",
+        "value": "0.00"
+      }
+    },
+    "currency_code": "USD",
+    "value": "180.00"
+  },
+  "configuration": {
+    "allow_only_pay_by_bank": false,
+    "allow_tip": false,
+    "allow_vba_payments": false,
+    "save_item_for_future": true,
+    "tax_calculated_after_discount": false,
+    "tax_inclusive": false,
+    "template_id": "TEMP-1X164905WD877670M"
+  },
+  "detail": {
+    "archived": false,
+    "category_code": "SHIPPABLE",
+    "currency_code": "USD",
+    "group_draft": false,
+    "invoice_date": "2026-11-02",
+    "invoice_number": "RECON-T-006",
+    "metadata": {
+      "caller_type": "API_V2_INVOICE",
+      "create_time": "2026-11-03T07:27:12Z",
+      "created_by_flow": "REGULAR_SINGLE",
+      "invoicer_view_url": "https://www.sandbox.paypal.com/invoice/details/INV2-6LKK-HF7L-ZCE8-85VW",
+      "last_update_time": "2026-11-03T07:30:42Z",
+      "recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#6LKKHF7LZCE885VW",
+      "spam_info": {}
+    },
+    "note": "Reconciliation test scenario: external-payment-settled",
+    "payment_term": {
+      "due_date": "2026-12-02",
+      "term_type": "NET_30"
+    },
+    "viewed_by_recipient": false
+  },
+  "due_amount": {
+    "currency_code": "USD",
+    "value": "0.00"
+  },
+  "id": "INV2-6LKK-HF7L-ZCE8-85VW",
+  "invoicer": {
+    "business_name": "Reconciliation Sandbox Merchant"
+  },
+  "items": [
+    {
+      "id": "ITEM-6JU67034016272314",
+      "name": "<redacted>",
+      "quantity": "1",
+      "unit_amount": {
+        "currency_code": "USD",
+        "value": "180.00"
+      }
+    }
+  ],
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-6LKK-HF7L-ZCE8-85VW",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "payments": {
+    "paid_amount": {
+      "currency_code": "USD",
+      "value": "180.00"
+    },
+    "transactions": [
+      {
+        "amount": {
+          "currency_code": "USD",
+          "value": "180.00"
+        },
+        "method": "BANK_TRANSFER",
+        "note": "Recorded by the reconciliation sandbox seeder",
+        "payment_date": "2026-11-03",
+        "payment_date_time": "2026-11-03T00:00:00Z",
+        "payment_id": "EXTR-2BN617564N0200944",
+        "type": "EXTERNAL"
+      }
+    ]
+  },
+  "settings": {},
+  "status": "MARKED_AS_PAID",
+  "unilateral": false
+}
