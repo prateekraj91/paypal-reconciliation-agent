@@ -26,7 +26,7 @@ Nothing here approves anything or touches a balance.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
 from .models import Payment, PaymentStatus
@@ -143,13 +143,12 @@ def resolve_delivery(deliveries: Sequence[Payment]) -> Payment:
         _assert_same_payment_facts(first, delivery)
         status = resolve_payment_status(status, delivery.status)
 
+    # `status` is always one of the delivered statuses, because
+    # resolve_payment_status only ever returns one of the two it was given. The
+    # earliest observation at that status is the moment the payment reached it,
+    # and min() makes the choice independent of delivery order.
     at_status = [d for d in deliveries if d.status is status]
-    if at_status:
-        return min(at_status, key=lambda d: d.received_at)
-
-    # The resolved status is more advanced than any single delivery only if the
-    # transition table ever gains a merge rule; keep the fields and stamp it.
-    return replace(first, status=status)
+    return min(at_status, key=lambda d: d.received_at)
 
 
 @dataclass(frozen=True)
