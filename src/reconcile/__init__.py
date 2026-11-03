@@ -22,6 +22,14 @@ from .interfaces import (
     StaticSource,
 )
 from .matching import MatchRun
+from .money import (
+    MINOR_UNIT_EXPONENTS,
+    UnsupportedCurrencyError,
+    format_minor_units,
+    minor_unit_exponent,
+    normalize_currency,
+    parse_money_to_minor_units,
+)
 from .models import (
     AccountingError,
     AllocationStatus,
@@ -42,6 +50,7 @@ from .models import (
     outstanding_cents,
 )
 from .scoring import Scorecard, format_scorecard, score
+from .sync import PayPalConnector, SyncReport, SyncResult, run_sync
 from .verifier import VerificationResult, verify_proposals
 from .workflow import (
     ReconciliationReport,
@@ -50,6 +59,9 @@ from .workflow import (
 )
 
 _PAYPAL_EXPORTS = {
+    "MAX_TRANSACTION_WINDOW_DAYS",
+    "TRANSACTION_APPEARANCE_DELAY_HOURS",
+    "TransactionIngest",
     "PayPalAPIError",
     "PayPalAccountingError",
     "PayPalAuthError",
@@ -57,7 +69,9 @@ _PAYPAL_EXPORTS = {
     "PayPalConfigError",
     "PayPalError",
     "PayPalNotFoundError",
+    "PayPalPaginationError",
     "PayPalTimeoutError",
+    "sync_windows",
 }
 
 
