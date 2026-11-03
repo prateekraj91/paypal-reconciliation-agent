@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 
 from .models import (
+    AllocationStatus,
     Candidate,
     Evidence,
     EvidenceCode,
@@ -40,6 +41,7 @@ from .models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
+    cross_check_invoice_balance,
     outstanding_cents,
 )
 from .normalize import canonical_reference
@@ -70,11 +72,24 @@ class BaselineMatcher:
     # ------------------------------------------------------------------
 
     def _match_one(self, p: Payment, run: "_Run") -> MatchProposal:
-        if p.payment_id in run.seen:
+        if p.payment_id in run.approved_payment_ids:
             return self._no_match(
-                p, Evidence(EvidenceCode.DUPLICATE_EVENT, f"payment {p.payment_id} already processed")
+                p,
+                Evidence(
+                    EvidenceCode.DUPLICATE_EVENT,
+                    f"payment {p.payment_id} is already approved in the ledger",
+                ),
             )
-        run.seen.add(p.payment_id)
+
+        if p.payment_id in run.seen:
+            prev_status = run.seen[p.payment_id]
+            if prev_status is PaymentStatus.PENDING and p.status is PaymentStatus.COMPLETED:
+                pass
+            else:
+                return self._no_match(
+                    p, Evidence(EvidenceCode.DUPLICATE_EVENT, f"payment {p.payment_id} already processed")
+                )
+        run.seen[p.payment_id] = p.status
 
         if p.status is not PaymentStatus.COMPLETED:
             return self._no_match(
@@ -142,7 +157,17 @@ class BaselineMatcher:
         if len(free) == 1:
             return self._proposed(p, free[0], run, weak)
         candidates = tuple(
-            Candidate((PaymentAllocation(p.payment_id, inv.invoice_id, p.amount_cents),), weak)
+            Candidate(
+                (
+                    PaymentAllocation(
+                        p.payment_id,
+                        inv.invoice_id,
+                        p.amount_cents,
+                        currency=inv.currency,
+                    ),
+                ),
+                weak,
+            )
             for inv in free
         )
         return MatchProposal(
@@ -161,7 +186,17 @@ class BaselineMatcher:
         self, p: Payment, inv: Invoice, run: "_Run", evidence: tuple[Evidence, ...]
     ) -> MatchProposal:
         run.claimed[inv.invoice_id] = p.payment_id
-        cand = Candidate((PaymentAllocation(p.payment_id, inv.invoice_id, p.amount_cents),), evidence)
+        cand = Candidate(
+            (
+                PaymentAllocation(
+                    p.payment_id,
+                    inv.invoice_id,
+                    p.amount_cents,
+                    currency=inv.currency,
+                ),
+            ),
+            evidence,
+        )
         return MatchProposal(p.payment_id, MatchOutcome.PROPOSED, (cand,), (), self.name)
 
     def _no_match(self, p: Payment, *reasons: Evidence) -> MatchProposal:
@@ -174,12 +209,15 @@ class _Run:
 
     def __init__(self, invoices: list[Invoice], approved: Sequence[PaymentAllocation]):
         self.invoices = invoices
-        self.outstanding = {i.invoice_id: outstanding_cents(i, approved) for i in invoices}
+        self.outstanding = {i.invoice_id: cross_check_invoice_balance(i, approved) for i in invoices}
         self.by_ref: dict[str, list[Invoice]] = {}
         for inv in invoices:
             self.by_ref.setdefault(canonical_reference(inv.number), []).append(inv)
         self.claimed: dict[str, str] = {}  # invoice_id -> payment_id holding the proposal
-        self.seen: set[str] = set()
+        self.seen: dict[str, PaymentStatus] = {}
+        self.approved_payment_ids: set[str] = {
+            a.payment_id for a in approved if a.status is AllocationStatus.APPROVED
+        }
 
     def blockers(self, p: Payment, inv: Invoice) -> list[Evidence]:
         out: list[Evidence] = []

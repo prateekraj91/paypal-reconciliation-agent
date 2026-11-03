@@ -12,6 +12,27 @@ from .verifier import verify_proposals
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--paypal":
+        from .paypal import PayPalClient, PayPalConfigError, PayPalError
+
+        try:
+            client = PayPalClient()
+        except PayPalConfigError as e:
+            print(f"Configuration error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Connecting to PayPal ({client.base_url})...")
+        try:
+            invoices, allocs = client.list_invoices_with_allocations()
+            print(
+                f"Ingested {len(invoices)} invoices and "
+                f"{len(allocs)} approved linked allocations from PayPal."
+            )
+        except PayPalError as e:
+            print(f"PayPal ingestion failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_SEED
     dataset = generate_dataset(seed)
 

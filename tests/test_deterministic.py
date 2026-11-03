@@ -8,6 +8,7 @@ from reconcile.models import (
     InvoiceStatus,
     MatchOutcome as O,
     PaymentAllocation,
+    PaymentStatus,
 )
 
 
@@ -404,3 +405,109 @@ def test_grouped_payment_without_references_is_not_matched():
     assert proposal.outcome is O.NO_MATCH
     assert E.REFERENCE_ABSENT in reason_codes(proposal)
 
+
+def test_decimal_amount_in_note_not_matched_as_invoice():
+    payment = pay(1, 1001, note="Paid INV 10.01 USD")
+    invoice = inv(1, 1001)  # INV-1001
+
+    proposal = M.match([payment], [invoice])[0]
+    assert proposal.outcome is O.NO_MATCH
+
+
+def test_pending_to_completed_status_transition_is_matched_not_discarded():
+    p_pending = pay(1, 50000, reference="INV-1001", status=PaymentStatus.PENDING, minutes=0)
+    p_completed = pay(1, 50000, reference="INV-1001", status=PaymentStatus.COMPLETED, minutes=5)
+    invoice = inv(1, 50000)
+
+    first, second = M.match([p_pending, p_completed], [invoice])
+    assert first.outcome is O.NO_MATCH
+    assert E.PAYMENT_NOT_COMPLETED in reason_codes(first)
+
+    assert second.outcome is O.PROPOSED
+    assert second.candidates[0].allocations[0].invoice_id == "inv_1"
+
+
+def test_duplicate_completed_payment_after_transition_is_rejected():
+    p_pending = pay(1, 50000, reference="INV-1001", status=PaymentStatus.PENDING, minutes=0)
+    p_completed = pay(1, 50000, reference="INV-1001", status=PaymentStatus.COMPLETED, minutes=5)
+    p_dup = pay(1, 50000, reference="INV-1001", status=PaymentStatus.COMPLETED, minutes=10)
+    invoice = inv(1, 50000)
+
+    first, second, third = M.match([p_pending, p_completed, p_dup], [invoice])
+    assert first.outcome is O.NO_MATCH and E.PAYMENT_NOT_COMPLETED in reason_codes(first)
+    assert second.outcome is O.PROPOSED
+    assert third.outcome is O.NO_MATCH and E.DUPLICATE_EVENT in reason_codes(third)
+
+
+def test_duplicate_pending_payment_is_rejected_as_duplicate():
+    p_pending1 = pay(1, 50000, reference="INV-1001", status=PaymentStatus.PENDING, minutes=0)
+    p_pending2 = pay(1, 50000, reference="INV-1001", status=PaymentStatus.PENDING, minutes=5)
+    invoice = inv(1, 50000)
+
+    first, second = M.match([p_pending1, p_pending2], [invoice])
+    assert first.outcome is O.NO_MATCH and E.PAYMENT_NOT_COMPLETED in reason_codes(first)
+    assert second.outcome is O.NO_MATCH and E.DUPLICATE_EVENT in reason_codes(second)
+
+
+def test_draft_invoice_is_not_matchable():
+    payment = pay(1, 50000, reference="INV-1001")
+    draft_invoice = inv(1, 50000, status=InvoiceStatus.DRAFT)
+
+    proposal = M.match([payment], [draft_invoice])[0]
+    assert proposal.outcome is O.NO_MATCH
+    assert E.INVOICE_NOT_OPEN in reason_codes(proposal)
+
+
+def test_matcher_fails_closed_when_due_amount_contradicts_ledger():
+    """Matcher must fail closed with ValueError when provider due_amount contradicts ledger balance."""
+    invoice = inv(1, 50000, due_amount_cents=30000)
+    payment = pay(1, 30000, reference="INV-1001")
+
+    import pytest
+    with pytest.raises(ValueError, match="Accounting inconsistency"):
+        M.match([payment], [invoice])
+
+
+def test_matcher_succeeds_when_due_amount_matches_approved_allocations():
+    """Matcher correctly derives remaining balance when due_amount agrees with approved allocations."""
+    invoice = inv(1, 50000, due_amount_cents=30000)
+    prev_payment = pay(1, 20000, reference="INV-1001")
+    prev_alloc = PaymentAllocation(
+        payment_id=prev_payment.payment_id,
+        invoice_id=invoice.invoice_id,
+        amount_cents=20000,
+        status=AllocationStatus.APPROVED,
+    )
+    payment = pay(2, 30000, reference="INV-1001")
+
+    [proposal] = M.match([payment], [invoice], approved=[prev_alloc])
+
+    assert proposal.outcome is O.PROPOSED
+    assert proposal.candidates[0].allocations[0].amount_cents == 30000
+    assert proposal.candidates[0].allocations[0].invoice_id == invoice.invoice_id
+
+
+def test_grouped_payment_with_previous_approved_allocation():
+    """Grouped payment covering two invoices, one of which has an approved prior payment."""
+    inv_1 = inv(1, 30000, due_amount_cents=10000)
+    inv_2 = inv(2, 20000, due_amount_cents=20000)
+    prev_payment = pay(99, 20000, reference="INV-1001")
+    prev_alloc = PaymentAllocation(
+        payment_id=prev_payment.payment_id,
+        invoice_id=inv_1.invoice_id,
+        amount_cents=20000,
+        status=AllocationStatus.APPROVED,
+    )
+
+    # Total remaining: inv_1 has 10000, inv_2 has 20000 -> 30000
+    payment = pay(1, 30000, note="Paying INV-1001 and INV-1002")
+
+    [proposal] = M.match([payment], [inv_1, inv_2], approved=[prev_alloc])
+
+    assert proposal.outcome is O.PROPOSED
+    cand = proposal.candidates[0]
+    assert len(cand.allocations) == 2
+    assert {a.invoice_id: a.amount_cents for a in cand.allocations} == {
+        inv_1.invoice_id: 10000,
+        inv_2.invoice_id: 20000,
+    }

@@ -20,6 +20,13 @@ class InvoiceSource(Protocol):
 
 
 @runtime_checkable
+class InvoiceAllocationSource(Protocol):
+    def list_invoices_with_allocations(
+        self,
+    ) -> tuple[Sequence[Invoice], Sequence[PaymentAllocation]]: ...
+
+
+@runtime_checkable
 class PaymentSource(Protocol):
     def list_payments(self) -> Sequence[Payment]:
         """The delivery stream. May contain the same payment_id more than once
@@ -49,9 +56,15 @@ class StaticSource:
 
     invoices: tuple[Invoice, ...]
     payments: tuple[Payment, ...]
+    allocations: tuple[PaymentAllocation, ...] = ()
 
     def list_invoices(self) -> Sequence[Invoice]:
         return self.invoices
 
     def list_payments(self) -> Sequence[Payment]:
         return self.payments
+
+    def list_invoices_with_allocations(
+        self,
+    ) -> tuple[Sequence[Invoice], Sequence[PaymentAllocation]]:
+        return self.invoices, self.allocations

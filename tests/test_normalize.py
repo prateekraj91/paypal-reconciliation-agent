@@ -50,3 +50,22 @@ def test_ignores_empty_text_and_unknown_numbers():
 
 def test_existing_canonical_reference_still_works():
     assert canonical_reference("inv 1001") == "INV1001"
+
+
+def test_reference_extraction_does_not_match_amount_with_decimal():
+    result = extract_invoice_references(
+        ["Paid INV 10.01 USD"], ("INV-1001",)
+    )
+    assert result == ()
+
+
+def test_reference_extraction_allows_separators_between_groups_not_inside_digits():
+    invoices = ("INV-1001", "INV-2026-01")
+    # Allowed separators between letter and digit groups
+    assert extract_invoice_references(["INV 1001"], invoices) == ("INV-1001",)
+    assert extract_invoice_references(["INV-1001"], invoices) == ("INV-1001",)
+    assert extract_invoice_references(["INV_1001"], invoices) == ("INV-1001",)
+    assert extract_invoice_references(["INV1001"], invoices) == ("INV-1001",)
+    # Not allowed inside digit groups
+    assert extract_invoice_references(["Paid INV 10.01 USD"], invoices) == ()
+    assert extract_invoice_references(["INV 10-01"], invoices) == ()

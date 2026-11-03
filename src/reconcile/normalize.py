@@ -34,10 +34,11 @@ def extract_invoice_references(
 
         known.add(canonical)
 
-        # Allow punctuation or spaces between characters:
-        # INV-1001, INV 1001 and INV1001 can all match.
+        # Allow separators between letter and digit groups, not inside digit groups.
+        # INV-1001, INV 1001 and INV1001 can all match, but not 'INV 10.01'.
+        groups = re.findall(r"[A-Za-z]+|[0-9]+", number)
         flexible = r"[^A-Za-z0-9]*".join(
-            re.escape(char) for char in canonical
+            re.escape(group) for group in groups
         )
         pattern = re.compile(
             rf"(?<![A-Za-z0-9]){flexible}(?![A-Za-z0-9])",
