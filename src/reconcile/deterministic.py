@@ -51,16 +51,29 @@ class DeterministicMatcher(BaselineMatcher):
         )
 
     def _match_one(self, p: Payment, run: _Run) -> MatchProposal:
-        # 1. Reject duplicate deliveries and uncompleted payments.
-        if p.payment_id in run.seen:
+        # 1. Reject already approved payments, duplicate deliveries, and uncompleted payments.
+        if p.payment_id in run.approved_payment_ids:
             return self._no_match(
                 p,
                 Evidence(
                     EvidenceCode.DUPLICATE_EVENT,
-                    f"payment {p.payment_id} was already processed",
+                    f"payment {p.payment_id} is already approved in the ledger",
                 ),
             )
-        run.seen.add(p.payment_id)
+
+        if p.payment_id in run.seen:
+            prev_status = run.seen[p.payment_id]
+            if prev_status is PaymentStatus.PENDING and p.status is PaymentStatus.COMPLETED:
+                pass
+            else:
+                return self._no_match(
+                    p,
+                    Evidence(
+                        EvidenceCode.DUPLICATE_EVENT,
+                        f"payment {p.payment_id} was already processed",
+                    ),
+                )
+        run.seen[p.payment_id] = p.status
 
         if p.status is not PaymentStatus.COMPLETED:
             return self._no_match(
@@ -282,6 +295,7 @@ class DeterministicMatcher(BaselineMatcher):
                 invoice_id=inv.invoice_id,
                 amount_cents=run.outstanding[inv.invoice_id],
                 status=AllocationStatus.PROPOSED,
+                currency=inv.currency,
             )
             for inv in matched_invoices
         )

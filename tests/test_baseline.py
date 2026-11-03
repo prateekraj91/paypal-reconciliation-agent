@@ -19,7 +19,7 @@ def test_reference_and_amount_propose_with_evidence():
     assert prop.outcome is O.PROPOSED
     cand = prop.candidates[0]
     assert cand.has(E.REFERENCE_MATCH) and cand.has(E.AMOUNT_EXACT)
-    assert cand.allocations == (PaymentAllocation("pay_1", "inv_1", 50000),)
+    assert cand.allocations == (PaymentAllocation("pay_1", "inv_1", 50000, currency="USD"),)
     assert cand.allocations[0].status is AllocationStatus.PROPOSED  # never approved
     assert prop.initial_status is ReconciliationStatus.PROPOSED
 
@@ -125,3 +125,11 @@ def test_interfaces_are_satisfied():
     src = StaticSource((inv(1, 100),), (pay(1, 100),))
     assert isinstance(src, InvoiceSource) and isinstance(src, PaymentSource)
     assert isinstance(M, Matcher)
+
+
+def test_baseline_pending_to_completed_status_transition():
+    p_pending = pay(1, 50000, reference="INV-1001", status=PaymentStatus.PENDING, minutes=0)
+    p_completed = pay(1, 50000, reference="INV-1001", status=PaymentStatus.COMPLETED, minutes=5)
+    first, second = M.match([p_pending, p_completed], [inv(1, 50000)])
+    assert first.outcome is O.NO_MATCH and E.PAYMENT_NOT_COMPLETED in codes(first)
+    assert second.outcome is O.PROPOSED

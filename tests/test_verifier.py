@@ -279,3 +279,35 @@ def test_reference_evidence_tag_does_not_prove_identity():
         "invoice reference" in issue.lower()
         for issue in result.issues
     )
+
+
+def test_verifier_fails_closed_when_due_amount_contradicts_ledger():
+    """Verifier must reject proposals when provider due_amount contradicts ledger balance."""
+    # Invoice total is 50000 cents, but due_amount_cents reports 30000 without approved allocations.
+    invoice = inv(1, 50000, due_amount_cents=30000)
+    payment = pay(1, 30000, reference="INV-1001")
+    proposal = make_proposal(payment, [allocation(payment, invoice, 30000)])
+
+    result = verify(proposal, payment, [invoice], existing_allocations=[])
+
+    assert not result.passed
+    assert any("Accounting inconsistency" in issue for issue in result.issues)
+
+
+def test_verifier_passes_when_due_amount_matches_approved_allocations():
+    """Verifier must pass when provider due_amount agrees with ledger balance."""
+    invoice = inv(1, 50000, due_amount_cents=30000)
+    payment = pay(2, 30000, reference="INV-1001")
+    previous_payment = pay(1, 20000, reference="INV-1001")
+    prev_alloc = PaymentAllocation(
+        payment_id=previous_payment.payment_id,
+        invoice_id=invoice.invoice_id,
+        amount_cents=20000,
+        status=AllocationStatus.APPROVED,
+    )
+    proposal = make_proposal(payment, [allocation(payment, invoice, 30000)])
+
+    result = verify(proposal, payment, [invoice], existing_allocations=[prev_alloc])
+
+    assert result.passed
+    assert result.issues == ()

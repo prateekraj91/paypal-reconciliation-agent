@@ -19,6 +19,7 @@ from .models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
+    cross_check_invoice_balance,
     outstanding_cents,
 )
 from .normalize import canonical_reference, extract_invoice_references
@@ -73,6 +74,7 @@ def verify_proposals(
 
     issues_by_index: list[list[str]] = [[] for _ in proposals]
     valid_candidates: dict[int, tuple[MatchProposal, Payment]] = {}
+    verified_invoice_balances: dict[str, int] = {}
 
     # Pass 1: validate each proposal independently.
     for index, proposal in enumerate(proposals):
@@ -201,7 +203,16 @@ def verify_proposals(
                     f"{payment.currency} payment vs {invoice.currency} invoice"
                 )
 
-            available = outstanding_cents(invoice, approved_allocations)
+            if invoice.invoice_id not in verified_invoice_balances:
+                try:
+                    verified_invoice_balances[invoice.invoice_id] = cross_check_invoice_balance(
+                        invoice, approved_allocations
+                    )
+                except ValueError as exc:
+                    issues.append(str(exc))
+                    continue
+
+            available = verified_invoice_balances[invoice.invoice_id]
 
             if available < 0:
                 issues.append(
@@ -231,7 +242,10 @@ def verify_proposals(
     for invoice_id, usages in usage_by_invoice.items():
         invoice_matches = invoices_by_id[invoice_id]
         invoice = invoice_matches[0]
-        available = outstanding_cents(invoice, approved_allocations)
+        available = verified_invoice_balances.get(
+            invoice_id,
+            outstanding_cents(invoice, approved_allocations),
+        )
         total_proposed = sum(amount for _index, amount in usages)
 
         if total_proposed > available:

@@ -41,6 +41,7 @@ class InvoiceStatus(str, Enum):
     A PayPal adapter maps PayPal's own status strings onto this smaller set.
     """
 
+    DRAFT = "DRAFT"
     SENT = "SENT"
     PARTIALLY_PAID = "PARTIALLY_PAID"
     PAID = "PAID"
@@ -123,16 +124,34 @@ class Invoice:
     status: InvoiceStatus = InvoiceStatus.SENT
     customer_email: Optional[str] = None
     memo: str = ""
+    due_amount_cents: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require(bool(self.invoice_id), "invoice_id is required")
         _require(bool(self.number), "invoice number is required")
         _require(self.amount_cents > 0, "invoice amount must be positive")
         _require(len(self.currency) == 3, "currency must be a 3-letter code")
+        if self.due_amount_cents is not None:
+            _require(self.due_amount_cents >= 0, "due_amount_cents cannot be negative")
+            _require(self.due_amount_cents <= self.amount_cents, "due_amount_cents cannot exceed total amount")
 
     @property
     def is_open(self) -> bool:
         return self.status.is_open
+
+    @property
+    def outstanding_balance_cents(self) -> int:
+        """Provider-reported snapshot balance (due_amount_cents or gross amount).
+
+        Represents the external billing provider's reported balance as of ingestion time.
+        It does NOT represent our internal ledger-calculated balance.
+
+        WARNING: This property must NEVER replace `outstanding_cents(invoice, allocations)`
+        or `cross_check_invoice_balance(invoice, allocations)` in accounting calculations,
+        matching, or verification, because it does not account for internal approved allocations.
+        """
+        return self.due_amount_cents if self.due_amount_cents is not None else self.amount_cents
+
 
 
 @dataclass(frozen=True)
@@ -166,9 +185,14 @@ class PaymentAllocation:
     invoice_id: str
     amount_cents: int
     status: AllocationStatus = AllocationStatus.PROPOSED
+    currency: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require(self.amount_cents > 0, "allocation amount must be positive")
+        if self.currency is not None:
+            norm = self.currency.strip().upper()
+            _require(len(norm) == 3, "currency must be a 3-letter code")
+            object.__setattr__(self, "currency", norm)
 
 
 @dataclass(frozen=True)
@@ -254,16 +278,101 @@ class MatchProposal:
 # --------------------------------------------------------------------------
 
 
+class AccountingError(ValueError):
+    """Raised when ledger allocations or balance cross-checks violate accounting invariants."""
+
+
+def deduplicate_allocations(
+    allocations: Iterable[PaymentAllocation],
+    *,
+    error_cls: type[Exception] = AccountingError,
+) -> list[PaymentAllocation]:
+    """Deduplicate payment allocations using the compound key (payment_id, invoice_id).
+
+    Preserves allocations with the same payment_id when they belong to different invoices
+    (e.g. split or grouped payments).
+
+    For duplicate compound keys:
+    - If amount_cents and status agree, deduplicates safely.
+    - If amount_cents or status conflicts, fails closed with error_cls (default AccountingError).
+    """
+    seen: dict[tuple[str, str], PaymentAllocation] = {}
+    deduped: list[PaymentAllocation] = []
+
+    for alloc in allocations:
+        key = (alloc.payment_id, alloc.invoice_id)
+        if key in seen:
+            existing = seen[key]
+            if existing.amount_cents != alloc.amount_cents:
+                raise error_cls(
+                    f"Conflicting allocation amount for payment {alloc.payment_id!r} "
+                    f"on invoice {alloc.invoice_id!r}: {existing.amount_cents} cents != {alloc.amount_cents} cents"
+                )
+            if existing.status != alloc.status:
+                raise error_cls(
+                    f"Conflicting allocation status for payment {alloc.payment_id!r} "
+                    f"on invoice {alloc.invoice_id!r}: {existing.status.value!r} != {alloc.status.value!r}"
+                )
+            if (
+                existing.currency is not None
+                and alloc.currency is not None
+                and existing.currency.strip().upper() != alloc.currency.strip().upper()
+            ):
+                raise error_cls(
+                    f"Conflicting allocation currency for payment {alloc.payment_id!r} "
+                    f"on invoice {alloc.invoice_id!r}: {existing.currency!r} != {alloc.currency!r}"
+                )
+            continue
+        seen[key] = alloc
+        deduped.append(alloc)
+
+    return deduped
+
+
 def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]) -> int:
     """Invoice total minus APPROVED allocations only.
 
-    Proposed and rejected allocations never count. A negative result means the
-    ledger over-allocated the invoice; callers should treat that as a bug, so
-    it is deliberately not clamped to zero.
+    Proposed and rejected allocations never count. Repeated allocations for the
+    same payment on this invoice are counted only once to prevent duplicate deductions.
+    When an allocation supplies a currency, it must match the invoice currency; a mismatch
+    raises AccountingError. For legacy allocations where currency is None, backward compatibility
+    is preserved (it does not prove a match, but is allowed for existing callers and tests).
+    A negative result means the ledger over-allocated the invoice; callers should treat that
+    as a bug, so it is deliberately not clamped to zero.
     """
-    approved = sum(
-        a.amount_cents
-        for a in allocations
-        if a.invoice_id == invoice.invoice_id and a.status is AllocationStatus.APPROVED
-    )
+    seen_payments: dict[str, int] = {}
+    approved = 0
+    inv_curr = invoice.currency.strip().upper()
+    for a in allocations:
+        if a.invoice_id == invoice.invoice_id and a.status is AllocationStatus.APPROVED:
+            if a.currency is not None and a.currency.strip().upper() != inv_curr:
+                raise AccountingError(
+                    f"Currency mismatch for allocation {a.payment_id!r} on invoice {invoice.invoice_id!r}: "
+                    f"allocation currency {a.currency.strip().upper()} does not match invoice currency {inv_curr}"
+                )
+            if a.payment_id in seen_payments:
+                if seen_payments[a.payment_id] != a.amount_cents:
+                    raise AccountingError(
+                        f"Conflicting approved allocation amount for payment {a.payment_id!r} "
+                        f"on invoice {invoice.invoice_id!r}: {seen_payments[a.payment_id]} cents != {a.amount_cents} cents"
+                    )
+                continue
+            seen_payments[a.payment_id] = a.amount_cents
+            approved += a.amount_cents
     return invoice.amount_cents - approved
+
+
+def cross_check_invoice_balance(invoice: Invoice, allocations: Iterable[PaymentAllocation]) -> int:
+    """Calculate ledger balance and verify it agrees with PayPal due_amount.
+
+    Treats PayPal due_amount as an independent cross-check against the ledger balance.
+    Fails closed (raises AccountingError) if PayPal due_amount contradicts the calculated balance.
+    """
+    calculated = outstanding_cents(invoice, allocations)
+    if invoice.due_amount_cents is not None and invoice.due_amount_cents != calculated:
+        raise AccountingError(
+            f"Accounting inconsistency for invoice {invoice.number}: "
+            f"calculated ledger balance {calculated} cents does not match "
+            f"PayPal due_amount {invoice.due_amount_cents} cents"
+        )
+    return calculated
