@@ -127,7 +127,8 @@ def verify_proposals(
         }
 
         # Do not let exact amounts alone pass verification.
-        if not candidate.has(EvidenceCode.REFERENCE_MATCH):
+        is_contextual = candidate.has(EvidenceCode.CONTEXTUAL_MATCH)
+        if not candidate.has(EvidenceCode.REFERENCE_MATCH) and not is_contextual:
             issues.append(
                 "trusted invoice reference evidence is required; "
                 "amount-only proposals cannot pass"
@@ -136,7 +137,14 @@ def verify_proposals(
         if candidate.payment_id != payment.payment_id:
             issues.append("candidate payment ID does not match payment record")
 
-        if candidate.total_cents != payment.amount_cents:
+        excess = getattr(proposal, "excess_amount_cents", 0)
+        if excess > 0:
+            if candidate.total_cents + excess != payment.amount_cents:
+                issues.append(
+                    f"candidate allocation total {candidate.total_cents} cents plus excess {excess} cents "
+                    f"does not equal payment amount {payment.amount_cents} cents"
+                )
+        elif candidate.total_cents != payment.amount_cents:
             issues.append(
                 f"candidate allocation total {candidate.total_cents} cents "
                 f"does not equal payment amount {payment.amount_cents} cents"
@@ -181,10 +189,11 @@ def verify_proposals(
             normalized_number = canonical_reference(invoice.number)
 
             if normalized_number not in actual_references:
-                issues.append(
-                    f"payment reference or note does not contain "
-                    f"invoice reference {invoice.number!r}"
-                )
+                if not is_contextual:
+                    issues.append(
+                        f"payment reference or note does not contain "
+                        f"invoice reference {invoice.number!r}"
+                    )
 
             matching_numbers = invoices_by_number.get(normalized_number, [])
             distinct_invoice_ids = {

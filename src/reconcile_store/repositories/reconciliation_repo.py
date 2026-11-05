@@ -79,6 +79,8 @@ class ProposalRepository(BaseRepository[ProposalRecord]):
         source_hashes: Optional[Dict[str, Any]] = None,
         verifier_status: str = "NOT_VERIFIED",
         allocations: Optional[List[Dict[str, Any]]] = None,
+        excess_amount_minor: int = 0,
+        ambiguity_certificate: Optional[Dict[str, Any]] = None,
     ) -> ProposalRecord:
         if verifier_status.upper() == "APPROVED":
             raise ValueError(
@@ -94,6 +96,8 @@ class ProposalRepository(BaseRepository[ProposalRecord]):
             evidence_json=canonical_json(list(evidence or [])),
             source_hashes_json=canonical_json(source_hashes or {}),
             verifier_status=verifier_status,
+            excess_amount_minor=excess_amount_minor,
+            ambiguity_certificate_json=canonical_json(ambiguity_certificate) if ambiguity_certificate else None,
             version=1,
             created_at=datetime.now(timezone.utc),
         )

@@ -43,6 +43,7 @@ from .models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
+    Refund,
 )
 from .normalize import canonical_reference
 
@@ -65,8 +66,9 @@ class BaselineMatcher:
         invoices: Sequence[Invoice],
         approved: Sequence[PaymentAllocation] = (),
         settlements: Sequence[PaymentAllocation] = (),
+        refunds: Sequence[Refund] = (),
     ) -> list[MatchProposal]:
-        run = MatchRun(invoices, approved, settlements=settlements)
+        run = MatchRun(invoices, approved, settlements=settlements, refunds=refunds)
         ordered = sorted(payments, key=lambda p: (p.received_at, p.payment_id))
         return [self._match_one(p, run) for p in ordered]
 

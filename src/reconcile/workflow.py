@@ -14,6 +14,7 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    Refund,
     deduplicate_allocations,
 )
 from .verifier import VerificationResult, verify_proposals
@@ -77,6 +78,7 @@ def reconcile_payments(
     matcher: Optional[Matcher] = None,
     existing_allocations: Optional[Sequence[PaymentAllocation]] = None,
     provider_settlements: Optional[Sequence[PaymentAllocation]] = None,
+    refunds: Optional[Sequence[Refund]] = None,
 ) -> ReconciliationRunResult:
     """Execute end-to-end reconciliation for a batch of payments against an invoice source.
 
@@ -132,14 +134,12 @@ def reconcile_payments(
     active_matcher = matcher or DeterministicMatcher()
     import inspect
     matcher_sig = inspect.signature(active_matcher.match)
+    match_kwargs: dict[str, Any] = {"approved": combined_allocs}
     if "settlements" in matcher_sig.parameters:
-        proposals = active_matcher.match(
-            payments, ingested_invoices, approved=combined_allocs, settlements=settled_allocs
-        )
-    else:
-        proposals = active_matcher.match(
-            payments, ingested_invoices, approved=combined_allocs
-        )
+        match_kwargs["settlements"] = settled_allocs
+    if "refunds" in matcher_sig.parameters and refunds is not None:
+        match_kwargs["refunds"] = refunds
+    proposals = active_matcher.match(payments, ingested_invoices, **match_kwargs)
 
     # 4. Independent verification
     proposed_only = [p for p in proposals if p.outcome is MatchOutcome.PROPOSED]

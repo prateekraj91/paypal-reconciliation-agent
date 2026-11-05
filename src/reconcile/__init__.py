@@ -1,5 +1,7 @@
 """Framework-independent core of the PayPal reconciliation exception agent."""
 
+from .advanced import AdvancedMatcher
+from .ambiguity import build_ambiguity_certificate, create_ambiguous_proposal
 from .baseline import BaselineConfig, BaselineMatcher
 from .dataset import CaseCategory, Dataset, GroundTruth, Resolution, generate_dataset
 from .delivery import (
@@ -33,6 +35,8 @@ from .money import (
 from .models import (
     AccountingError,
     AllocationStatus,
+    AmbiguityCandidateScore,
+    AmbiguityCertificate,
     Candidate,
     Evidence,
     EvidenceCode,
@@ -44,6 +48,7 @@ from .models import (
     PaymentAllocation,
     PaymentStatus,
     ReconciliationStatus,
+    Refund,
     cross_check_invoice_balance,
     deduplicate_allocations,
     migrate_allocation_currency,
