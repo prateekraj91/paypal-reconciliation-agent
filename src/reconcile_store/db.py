@@ -58,6 +58,16 @@ def get_engine(config: Optional[DatabaseConfig] = None) -> Engine:
         return engine
 
     # PostgreSQL configuration
+    if cfg.null_pool:
+        from sqlalchemy.pool import NullPool
+        connect_args = {"prepare_threshold": 0} if cfg.is_postgres else {}
+        return create_engine(
+            cfg.url,
+            echo=cfg.echo,
+            poolclass=NullPool,
+            connect_args=connect_args,
+        )
+
     engine = create_engine(
         cfg.url,
         echo=cfg.echo,

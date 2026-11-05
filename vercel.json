@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ],
+  "daemons": {
+    "reconcile-worker": {
+      "root": ".",
+      "entrypoint": "Dockerfile.worker",
+      "instances": {
+        "iad1": 1
+      }
+    }
+  }
+}
