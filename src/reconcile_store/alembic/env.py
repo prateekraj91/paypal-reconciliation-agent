@@ -21,8 +21,12 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
-# Check if environment explicitly specifies database URL
-env_url = os.environ.get("RECONCILE_DB_URL") or os.environ.get("DATABASE_URL")
+# Check if environment explicitly specifies database URL (MIGRATION_DB_URL takes priority for direct session mode)
+env_url = (
+    os.environ.get("MIGRATION_DB_URL")
+    or os.environ.get("RECONCILE_DB_URL")
+    or os.environ.get("DATABASE_URL")
+)
 if env_url:
     if env_url.startswith("postgres://"):
         env_url = env_url.replace("postgres://", "postgresql+psycopg://", 1)
