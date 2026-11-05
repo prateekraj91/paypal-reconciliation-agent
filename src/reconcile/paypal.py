@@ -222,6 +222,19 @@ def _load_dotenv(filepath: str = ".env") -> dict[str, str]:
     return env
 
 
+def load_dotenv(filepath: str = ".env", override: bool = False) -> dict[str, str]:
+    """Parse a simple key=value .env file and load into os.environ.
+
+    Standard library only. If override is False, existing os.environ values
+    are preserved.
+    """
+    env = _load_dotenv(filepath)
+    for key, val in env.items():
+        if override or key not in os.environ:
+            os.environ[key] = val
+    return env
+
+
 def _parse_rfc3339(value: Any, context: str) -> datetime:
     """Parse a PayPal RFC 3339 timestamp into an aware UTC datetime."""
     if not value or not str(value).strip():
@@ -299,6 +312,7 @@ class PayPalClient:
         timeout: float = 10.0,
         env_file: Optional[str] = ".env",
         token_buffer_seconds: float = 60.0,
+        scopes: Optional[str] = None,
     ) -> None:
         env_dict = _load_dotenv(env_file) if env_file else {}
 
@@ -324,6 +338,12 @@ class PayPalClient:
         self.timeout = timeout
         self.token_buffer_seconds = token_buffer_seconds
 
+        self.scopes = (
+            scopes
+            if scopes is not None
+            else "https://uri.paypal.com/services/invoicing https://uri.paypal.com/services/reporting/search/read"
+        )
+
         if not self.client_id or not self._client_secret:
             raise PayPalConfigError(
                 "Missing PayPal credentials: both PAYPAL_CLIENT_ID and "
@@ -334,6 +354,8 @@ class PayPalClient:
         self._token_expires_at: float = 0.0
         # Injectable so tests exercise the backoff schedule without waiting.
         self._sleep = time.sleep
+        self.last_invoice_evidence: dict[str, dict] = {}
+        self.last_embedded_payment_evidence: dict[str, dict] = {}
 
     def __repr__(self) -> str:
         masked_id = f"{self.client_id[:4]}***" if len(self.client_id) >= 4 else "***"
@@ -357,9 +379,14 @@ class PayPalClient:
         credentials = f"{self.client_id}:{self._client_secret}"
         encoded_creds = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
 
+        token_params = {"grant_type": "client_credentials"}
+        if self.scopes:
+            token_params["scope"] = self.scopes
+        req_data = urllib.parse.urlencode(token_params).encode("utf-8")
+
         req = urllib.request.Request(
             token_url,
-            data=b"grant_type=client_credentials",
+            data=req_data,
             headers={
                 "Authorization": f"Basic {encoded_creds}",
                 "Accept": "application/json",
@@ -403,6 +430,7 @@ class PayPalClient:
         method: str,
         path: str,
         query: Optional[dict[str, Any]] = None,
+        body: Optional[Any] = None,
     ) -> dict[str, Any]:
         token = self.get_access_token()
         url = f"{self.base_url}{path}"
@@ -410,8 +438,18 @@ class PayPalClient:
             clean_query = {k: v for k, v in query.items() if v is not None}
             url = f"{url}?{urllib.parse.urlencode(clean_query)}"
 
+        data = None
+        if body is not None:
+            if isinstance(body, (dict, list)):
+                data = json.dumps(body).encode("utf-8")
+            elif isinstance(body, str):
+                data = body.encode("utf-8")
+            else:
+                data = body
+
         req = urllib.request.Request(
             url,
+            data=data,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
@@ -673,16 +711,43 @@ class PayPalClient:
 
         invoices: list[Invoice] = []
         raw_allocations: list[PaymentAllocation] = []
+        invoice_evidence: dict[str, dict] = {}
+        embedded_payment_evidence: dict[str, dict] = {}
+
         for item in raw:
             if hydrate and self.needs_payment_provenance(item):
                 item = self.hydrate_invoice(item)
-            invoices.append(self.map_invoice(item))
+            mapped_inv = self.map_invoice(item)
+            invoices.append(mapped_inv)
+            invoice_evidence[mapped_inv.invoice_id] = item
+
+            # Preserve embedded invoice payment transaction JSON
+            payments_dict = item.get("payments") or {}
+            transactions = payments_dict.get("transactions") or []
+            for txn in transactions:
+                txn_id = txn.get("payment_id") or txn.get("transaction_id") or txn.get("id")
+                if txn_id:
+                    embedded_payment_evidence[str(txn_id)] = txn
+
             raw_allocations.extend(self.extract_linked_allocations(item))
+
+        self.last_invoice_evidence = dict(invoice_evidence)
+        self.last_embedded_payment_evidence = dict(embedded_payment_evidence)
 
         allocations = deduplicate_allocations(
             raw_allocations, error_cls=PayPalAccountingError
         )
         return invoices, allocations
+
+    @property
+    def invoice_evidence(self) -> dict[str, dict]:
+        """Original raw JSON payloads of all invoices fetched during the latest listing."""
+        return dict(self.last_invoice_evidence)
+
+    @property
+    def embedded_payment_evidence(self) -> dict[str, dict]:
+        """Original raw JSON payloads of all payments embedded within fetched invoices."""
+        return dict(self.last_embedded_payment_evidence)
 
     def get_raw_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Fetch raw JSON representation of an individual invoice."""
@@ -694,6 +759,47 @@ class PayPalClient:
         """Fetch an individual invoice and map it into an Invoice model."""
         raw = self.get_raw_invoice(invoice_id)
         return self.map_invoice(raw)
+
+    def get_raw_capture(self, capture_id: str) -> dict[str, Any]:
+        """Fetch raw JSON representation of an individual payment capture."""
+        if not capture_id:
+            raise ValueError("capture_id is required")
+        return self._request("GET", f"/v2/payments/captures/{urllib.parse.quote(capture_id)}")
+
+    def verify_webhook_signature(
+        self,
+        transmission_id: str,
+        transmission_time: str,
+        cert_url: str,
+        auth_algo: str,
+        transmission_sig: str,
+        webhook_id: str,
+        webhook_event: dict[str, Any],
+    ) -> bool:
+        """Verify authenticity of a PayPal webhook event using PayPal's postback endpoint.
+
+        POST /v1/notifications/verify-webhook-signature
+        Returns True if verification_status == "SUCCESS", False if "FAILURE" or invalid signature.
+        Raises PayPalTimeoutError or PayPalAPIError on transient/network/auth errors.
+        """
+        payload = {
+            "transmission_id": transmission_id,
+            "transmission_time": transmission_time,
+            "cert_url": cert_url,
+            "auth_algo": auth_algo,
+            "transmission_sig": transmission_sig,
+            "webhook_id": webhook_id,
+            "webhook_event": webhook_event,
+        }
+        try:
+            res = self._request("POST", "/v1/notifications/verify-webhook-signature", body=payload)
+            status = res.get("verification_status")
+            return status == "SUCCESS"
+        except PayPalAPIError as exc:
+            if exc.status_code == 400:
+                # 400 Bad Request from PayPal indicates malformed or unverifiable signature
+                return False
+            raise
 
     # ----------------------------------------------------------------------
     # Retrying transport for read-only endpoints

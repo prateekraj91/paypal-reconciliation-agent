@@ -19,7 +19,10 @@ from .reconciliation_repo import (
     DecisionRepository,
 )
 from .allocation_repo import AllocationRepository
+from .settlement_repo import ProviderSettlementRepository
 from .audit_repo import AuditRepository
+from .webhook_repo import WebhookInboxRepository, InvalidWebhookStateTransitionError
+from .job_repo import JobRepository
 
 __all__ = [
     "BaseRepository",
@@ -39,5 +42,9 @@ __all__ = [
     "VerificationRepository",
     "DecisionRepository",
     "AllocationRepository",
+    "ProviderSettlementRepository",
     "AuditRepository",
+    "WebhookInboxRepository",
+    "InvalidWebhookStateTransitionError",
+    "JobRepository",
 ]
