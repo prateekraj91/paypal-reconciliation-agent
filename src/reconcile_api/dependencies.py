@@ -52,4 +52,9 @@ def get_paypal_client() -> PayPalClient:
         client_id=config.paypal_client_id,
         client_secret=config.paypal_client_secret,
         base_url=base_url,
+        scopes=(
+            "https://uri.paypal.com/services/invoicing "
+            "https://uri.paypal.com/services/reporting/search/read "
+            "https://uri.paypal.com/services/applications/webhooks"
+        ),
     )
