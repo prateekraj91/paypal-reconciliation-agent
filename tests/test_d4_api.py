@@ -525,3 +525,10 @@ def test_bootstrap_database_fresh_and_idempotent(test_db):
         assert c2.id == c1.id
 
 
+def test_documentation_endpoints_disabled(client):
+    """Ensure /docs, /redoc, and /openapi.json are disabled and return 404."""
+    for endpoint in ("/docs", "/redoc", "/openapi.json"):
+        res = client.get(endpoint)
+        assert res.status_code == 404
+
+
