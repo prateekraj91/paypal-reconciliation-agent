@@ -64,8 +64,9 @@ class BaselineMatcher:
         payments: Sequence[Payment],
         invoices: Sequence[Invoice],
         approved: Sequence[PaymentAllocation] = (),
+        settlements: Sequence[PaymentAllocation] = (),
     ) -> list[MatchProposal]:
-        run = MatchRun(invoices, approved)
+        run = MatchRun(invoices, approved, settlements=settlements)
         ordered = sorted(payments, key=lambda p: (p.received_at, p.payment_id))
         return [self._match_one(p, run) for p in ordered]
 
@@ -78,6 +79,12 @@ class BaselineMatcher:
         duplicates, replayed deliveries, canonical status transitions and
         uncompleted payments are decided in exactly one place.
         """
+        if p.payment_id in run.settled_payment_ids:
+            return Evidence(
+                EvidenceCode.PROVIDER_SETTLED,
+                f"payment {p.payment_id} was settled directly by external provider",
+            )
+
         if p.payment_id in run.approved_payment_ids:
             return Evidence(
                 EvidenceCode.DUPLICATE_EVENT,
@@ -100,6 +107,14 @@ class BaselineMatcher:
     def _match_one(self, p: Payment, run: MatchRun) -> MatchProposal:
         blocker = self.screen_delivery(p, run)
         if blocker is not None:
+            if blocker.code is EvidenceCode.PROVIDER_SETTLED:
+                return MatchProposal(
+                    payment_id=p.payment_id,
+                    outcome=MatchOutcome.PROVIDER_SETTLED,
+                    candidates=(),
+                    reasons=(blocker,),
+                    matcher=self.name,
+                )
             return self.no_match(p, blocker)
 
         ref = canonical_reference(p.reference)

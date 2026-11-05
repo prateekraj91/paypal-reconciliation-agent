@@ -24,6 +24,10 @@ target_metadata = Base.metadata
 # Check if environment explicitly specifies database URL
 env_url = os.environ.get("RECONCILE_DB_URL") or os.environ.get("DATABASE_URL")
 if env_url:
+    if env_url.startswith("postgres://"):
+        env_url = env_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif env_url.startswith("postgresql://") and not env_url.startswith("postgresql+"):
+        env_url = env_url.replace("postgresql://", "postgresql+psycopg://", 1)
     config.set_main_option("sqlalchemy.url", env_url)
 elif not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", "sqlite:///recon.db")

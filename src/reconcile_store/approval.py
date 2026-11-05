@@ -20,6 +20,7 @@ from .schema import (
     PaymentRecord,
     InvoiceRecord,
     AllocationRecord,
+    ProviderSettlementRecord,
     DecisionRecord,
     VerificationRecord,
     AuditEventRecord,
@@ -250,7 +251,7 @@ class ApprovalService:
             domain_payment = payment.to_domain()
             domain_invoices = [inv.to_domain() for inv in invoices_by_id.values()]
 
-            # Load all existing approved allocations on these invoices and payment
+            # Load all existing approved allocations and provider settlements on these invoices and payment
             stmt_exist_pay_allocs = select(AllocationRecord).where(
                 AllocationRecord.tenant_id == tenant_id,
                 AllocationRecord.payment_id == payment.id,
@@ -264,7 +265,20 @@ class ApprovalService:
                 | set(self.session.scalars(stmt_exist_inv_allocs).all())
             )
 
-            # Map DB allocations to domain PaymentAllocation
+            stmt_exist_pay_sett = select(ProviderSettlementRecord).where(
+                ProviderSettlementRecord.tenant_id == tenant_id,
+                ProviderSettlementRecord.payment_id == payment.id,
+            )
+            stmt_exist_inv_sett = select(ProviderSettlementRecord).where(
+                ProviderSettlementRecord.tenant_id == tenant_id,
+                ProviderSettlementRecord.invoice_id.in_(affected_invoice_ids),
+            )
+            existing_db_settlements = list(
+                set(self.session.scalars(stmt_exist_pay_sett).all())
+                | set(self.session.scalars(stmt_exist_inv_sett).all())
+            )
+
+            # Map DB allocations and settlements to domain PaymentAllocation
             domain_existing_allocs: List[PaymentAllocation] = []
             for eda in existing_db_allocs:
                 eda_pay = self.session.get(PaymentRecord, eda.payment_id)
@@ -272,6 +286,16 @@ class ApprovalService:
                 if eda_pay and eda_inv:
                     domain_existing_allocs.append(
                         eda.to_domain(eda_pay.provider_payment_id, eda_inv.provider_invoice_id)
+                    )
+
+            for eds in existing_db_settlements:
+                eds_pay = self.session.get(PaymentRecord, eds.payment_id) if eds.payment_id else None
+                eds_inv = self.session.get(InvoiceRecord, eds.invoice_id)
+                pay_id_str = eds_pay.provider_payment_id if eds_pay else eds.provider_settlement_id
+                inv_id_str = eds_inv.provider_invoice_id if eds_inv else ""
+                if inv_id_str:
+                    domain_existing_allocs.append(
+                        eds.to_domain(pay_id_str, inv_id_str)
                     )
 
             # Reconstruct candidate and proposal for verifier
@@ -320,32 +344,56 @@ class ApprovalService:
             # ------------------------------------------------------------------
             # STEP 5 & 6: Recalculate allocation amounts and check capacities
             # ------------------------------------------------------------------
-            # Calculate current payment allocations
-            stmt_curr_pay = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
+            # Calculate current payment allocations + provider settlements
+            stmt_curr_pay_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
                 AllocationRecord.tenant_id == tenant_id,
                 AllocationRecord.payment_id == payment.id,
             )
-            current_pay_allocated = int(self.session.scalar(stmt_curr_pay) or 0)
+            stmt_curr_pay_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
+                ProviderSettlementRecord.tenant_id == tenant_id,
+                ProviderSettlementRecord.payment_id == payment.id,
+            )
+            current_pay_allocated = int(self.session.scalar(stmt_curr_pay_alloc) or 0) + int(self.session.scalar(stmt_curr_pay_sett) or 0)
             proposed_pay_total = sum(pa.amount_minor for pa in proposed_allocs)
 
             if current_pay_allocated + proposed_pay_total > payment.amount_minor:
                 raise LedgerConstraintError(
                     f"Payment capacity exceeded (I2): payment amount {payment.amount_minor} minor units, "
-                    f"already allocated {current_pay_allocated}, proposed {proposed_pay_total}"
+                    f"already allocated/settled {current_pay_allocated}, proposed {proposed_pay_total}"
                 )
 
-            # Calculate capacity per invoice
+            # Calculate capacity per invoice and ensure no duplicate provider settlement
             for pa in proposed_allocs:
                 inv = invoices_by_id[pa.invoice_id]
-                stmt_curr_inv = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
+
+                # Ensure a provider settlement cannot later be approved again as a duplicate allocation
+                stmt_dup_sett = select(ProviderSettlementRecord).where(
+                    ProviderSettlementRecord.tenant_id == tenant_id,
+                    ProviderSettlementRecord.invoice_id == inv.id,
+                    (
+                        (ProviderSettlementRecord.payment_id == payment.id)
+                        | (ProviderSettlementRecord.provider_settlement_id == payment.provider_payment_id)
+                    ),
+                )
+                if self.session.scalars(stmt_dup_sett).first() is not None:
+                    raise ConflictError(
+                        f"Cannot approve allocation for payment '{payment.provider_payment_id}' and invoice '{inv.provider_invoice_id}': "
+                        f"already settled by provider."
+                    )
+
+                stmt_curr_inv_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
                     AllocationRecord.tenant_id == tenant_id,
                     AllocationRecord.invoice_id == inv.id,
                 )
-                curr_inv_allocated = int(self.session.scalar(stmt_curr_inv) or 0)
+                stmt_curr_inv_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
+                    ProviderSettlementRecord.tenant_id == tenant_id,
+                    ProviderSettlementRecord.invoice_id == inv.id,
+                )
+                curr_inv_allocated = int(self.session.scalar(stmt_curr_inv_alloc) or 0) + int(self.session.scalar(stmt_curr_inv_sett) or 0)
                 if curr_inv_allocated + pa.amount_minor > inv.total_minor:
                     raise LedgerConstraintError(
                         f"Invoice capacity exceeded (I3): invoice '{inv.provider_invoice_id}' total {inv.total_minor}, "
-                        f"already allocated {curr_inv_allocated}, proposed {pa.amount_minor}"
+                        f"already allocated/settled {curr_inv_allocated}, proposed {pa.amount_minor}"
                     )
 
             # ------------------------------------------------------------------
