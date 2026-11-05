@@ -54,6 +54,14 @@ class DeterministicMatcher(BaselineMatcher):
         #    deliveries, and payments PayPal has not completed.
         blocker = self.screen_delivery(p, run)
         if blocker is not None:
+            if blocker.code is EvidenceCode.PROVIDER_SETTLED:
+                return MatchProposal(
+                    payment_id=p.payment_id,
+                    outcome=MatchOutcome.PROVIDER_SETTLED,
+                    candidates=(),
+                    reasons=(blocker,),
+                    matcher=self.name,
+                )
             return self.no_match(p, blocker)
 
         invoice_numbers = [invoice.number for invoice in run.invoices]

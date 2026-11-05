@@ -188,8 +188,10 @@ def test_complete_integrated_service_workflow(workflow_db):
     with db.session() as session:
         audit_repo = AuditRepository(session)
         events = list(audit_repo.list_events("tenant_demo"))
-        assert len(events) == 1
-        assert events[0].event_type == "PROPOSAL_APPROVED"
+        approval_events = [e for e in events if e.event_type == "PROPOSAL_APPROVED"]
+        assert len(approval_events) == 1
+        settlement_events = [e for e in events if e.event_type == "PROVIDER_SETTLEMENT_RECORDED"]
+        assert len(settlement_events) == len(linked_allocs)
         audit_repo.verify_tenant_chain("tenant_demo")
 
     # 6. Database / Process Restart: Dispose engine and reconnect freshly
