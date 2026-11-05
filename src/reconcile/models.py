@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import Enum
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 
 def _require(condition: bool, message: str) -> None:
@@ -108,6 +108,15 @@ class EvidenceCode(str, Enum):
     MULTIPLE_CANDIDATES = "MULTIPLE_CANDIDATES"
     NO_CANDIDATE = "NO_CANDIDATE"
     PROVIDER_SETTLED = "PROVIDER_SETTLED"
+    CONTEXTUAL_MATCH = "CONTEXTUAL_MATCH"
+    CUSTOMER_NAME_MATCH = "CUSTOMER_NAME_MATCH"
+    CUSTOMER_EMAIL_MATCH = "CUSTOMER_EMAIL_MATCH"
+    FUZZY_REFERENCE_MATCH = "FUZZY_REFERENCE_MATCH"
+    TEMPORAL_PROXIMITY_MATCH = "TEMPORAL_PROXIMITY_MATCH"
+    AMOUNT_OVERPAYMENT = "AMOUNT_OVERPAYMENT"
+    AMBIGUOUS_CANDIDATES = "AMBIGUOUS_CANDIDATES"
+    REFUND_PROCESSED = "REFUND_PROCESSED"
+    REVERSAL_PROCESSED = "REVERSAL_PROCESSED"
 
 
 # --------------------------------------------------------------------------
@@ -172,6 +181,26 @@ class Payment:
     def __post_init__(self) -> None:
         _require(bool(self.payment_id), "payment_id is required")
         _require(self.amount_cents > 0, "payment amount must be positive")
+        _require(len(self.currency) == 3, "currency must be a 3-letter code")
+
+
+@dataclass(frozen=True)
+class Refund:
+    """External refund or reversal linked to a parent payment."""
+
+    refund_id: str
+    parent_payment_id: str
+    amount_cents: int
+    currency: str
+    refunded_at: datetime
+    status: str = "COMPLETED"
+    reason: str = ""
+    invoice_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require(bool(self.refund_id), "refund_id is required")
+        _require(bool(self.parent_payment_id), "parent_payment_id is required")
+        _require(self.amount_cents > 0, "refund amount must be positive")
         _require(len(self.currency) == 3, "currency must be a 3-letter code")
 
 
@@ -241,6 +270,87 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class AmbiguityCandidateScore:
+    invoice_id: str
+    invoice_number: str
+    score: int
+    matched_signals: tuple[str, ...] = ()
+    unmatched_signals: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "invoice_id": self.invoice_id,
+            "invoice_number": self.invoice_number,
+            "score": int(round(self.score)),
+            "matched_signals": list(self.matched_signals),
+            "unmatched_signals": list(self.unmatched_signals),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AmbiguityCandidateScore":
+        return cls(
+            invoice_id=data["invoice_id"],
+            invoice_number=data["invoice_number"],
+            score=int(round(data["score"])),
+            matched_signals=tuple(data.get("matched_signals", ())),
+            unmatched_signals=tuple(data.get("unmatched_signals", ())),
+        )
+
+
+@dataclass(frozen=True)
+class AmbiguityCertificate:
+    payment_id: str
+    candidate_invoice_ids: tuple[str, ...]
+    candidate_scores: dict[str, int]
+    supporting_evidence: dict[str, tuple[Evidence, ...]]
+    conflicting_evidence: tuple[Evidence, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+    rejection_reasons: tuple[str, ...] = ()
+    recommended_steps: tuple[str, ...] = ()
+    requires_human_approval: bool = True
+    classification: str = "AMBIGUOUS"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "payment_id": self.payment_id,
+            "candidate_invoice_ids": list(self.candidate_invoice_ids),
+            "candidate_scores": {k: int(round(v)) for k, v in sorted(self.candidate_scores.items())},
+            "supporting_evidence": {
+                k: [{"code": e.code.value, "detail": e.detail} for e in ev_list]
+                for k, ev_list in sorted(self.supporting_evidence.items())
+            },
+            "conflicting_evidence": [{"code": e.code.value, "detail": e.detail} for e in self.conflicting_evidence],
+            "missing_evidence": list(self.missing_evidence),
+            "rejection_reasons": list(self.rejection_reasons),
+            "recommended_steps": list(self.recommended_steps),
+            "requires_human_approval": self.requires_human_approval,
+            "classification": self.classification,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AmbiguityCertificate":
+        supporting = {}
+        for k, v in data.get("supporting_evidence", {}).items():
+            supporting[k] = tuple(Evidence(code=EvidenceCode(e["code"]), detail=e.get("detail", "")) for e in v)
+        conflicting = tuple(
+            Evidence(code=EvidenceCode(e["code"]), detail=e.get("detail", ""))
+            for e in data.get("conflicting_evidence", [])
+        )
+        return cls(
+            payment_id=data["payment_id"],
+            candidate_invoice_ids=tuple(data.get("candidate_invoice_ids", ())),
+            candidate_scores={k: int(round(v)) for k, v in data.get("candidate_scores", {}).items()},
+            supporting_evidence=supporting,
+            conflicting_evidence=conflicting,
+            missing_evidence=tuple(data.get("missing_evidence", ())),
+            rejection_reasons=tuple(data.get("rejection_reasons", ())),
+            recommended_steps=tuple(data.get("recommended_steps", ())),
+            requires_human_approval=data.get("requires_human_approval", True),
+            classification=data.get("classification", "AMBIGUOUS"),
+        )
+
+
+@dataclass(frozen=True)
 class MatchProposal:
     """The matcher's answer for ONE delivered payment.
 
@@ -253,6 +363,8 @@ class MatchProposal:
     candidates: tuple[Candidate, ...] = ()
     reasons: tuple[Evidence, ...] = ()  # payment-level evidence
     matcher: str = ""
+    ambiguity_certificate: Optional[AmbiguityCertificate] = None
+    excess_amount_cents: int = 0
 
     def __post_init__(self) -> None:
         n = len(self.candidates)
@@ -266,6 +378,7 @@ class MatchProposal:
             all(c.payment_id == self.payment_id for c in self.candidates),
             "candidate belongs to a different payment",
         )
+        _require(self.excess_amount_cents >= 0, "excess_amount_cents cannot be negative")
 
     @property
     def initial_status(self) -> ReconciliationStatus:
@@ -336,8 +449,12 @@ def deduplicate_allocations(
     return deduped
 
 
-def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]) -> int:
-    """Invoice total minus APPROVED allocations only.
+def outstanding_cents(
+    invoice: Invoice,
+    allocations: Iterable[PaymentAllocation],
+    refunds: Iterable[Refund] = (),
+) -> int:
+    """Invoice total minus APPROVED allocations only, plus approved refunds.
 
     Proposed and rejected allocations never count. Repeated allocations for the
     same payment on this invoice are counted only once to prevent duplicate deductions.
@@ -349,6 +466,10 @@ def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]
     explicit migration path, `migrate_allocation_currency`.
     A negative result means the ledger over-allocated the invoice; callers should treat that
     as a bug, so it is deliberately not clamped to zero.
+
+    Approved refunds linked to approved payments on this invoice restore outstanding balance.
+    Refunds cannot exceed the approved payment amount on the invoice. Duplicate refunds
+    with matching amounts are deduplicated safely; conflicting amounts raise AccountingError.
     """
     seen_payments: dict[str, int] = {}
     approved = 0
@@ -376,7 +497,32 @@ def outstanding_cents(invoice: Invoice, allocations: Iterable[PaymentAllocation]
                 continue
             seen_payments[a.payment_id] = a.amount_cents
             approved += a.amount_cents
-    return invoice.amount_cents - approved
+
+    refunded = 0
+    seen_refunds: dict[str, int] = {}
+    for r in refunds:
+        if r.status.upper() == "COMPLETED" and (r.invoice_id is None or r.invoice_id == invoice.invoice_id):
+            if r.parent_payment_id in seen_payments:
+                if r.currency.strip().upper() != inv_curr:
+                    raise AccountingError(
+                        f"Currency mismatch for refund {r.refund_id!r}: {r.currency} vs invoice {inv_curr}"
+                    )
+                if r.refund_id in seen_refunds:
+                    if seen_refunds[r.refund_id] != r.amount_cents:
+                        raise AccountingError(
+                            f"Conflicting refund amount for {r.refund_id!r}: {seen_refunds[r.refund_id]} cents != {r.amount_cents} cents"
+                        )
+                    continue
+                seen_refunds[r.refund_id] = r.amount_cents
+                refunded += r.amount_cents
+
+    if refunded > approved:
+        raise AccountingError(
+            f"Total refunds ({refunded} cents) exceed approved allocations ({approved} cents) on invoice {invoice.number}"
+        )
+
+    net_deductions = approved - refunded
+    return invoice.amount_cents - net_deductions
 
 
 def migrate_allocation_currency(
@@ -433,13 +579,17 @@ def migrate_allocation_currency(
     return migrated
 
 
-def cross_check_invoice_balance(invoice: Invoice, allocations: Iterable[PaymentAllocation]) -> int:
+def cross_check_invoice_balance(
+    invoice: Invoice,
+    allocations: Iterable[PaymentAllocation],
+    refunds: Iterable[Refund] = (),
+) -> int:
     """Calculate ledger balance and verify it agrees with PayPal due_amount.
 
     Treats PayPal due_amount as an independent cross-check against the ledger balance.
     Fails closed (raises AccountingError) if PayPal due_amount contradicts the calculated balance.
     """
-    calculated = outstanding_cents(invoice, allocations)
+    calculated = outstanding_cents(invoice, allocations, refunds=refunds)
     if invoice.due_amount_cents is not None and invoice.due_amount_cents != calculated:
         raise AccountingError(
             f"Accounting inconsistency for invoice {invoice.number}: "
