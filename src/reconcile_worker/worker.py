@@ -311,7 +311,10 @@ class Worker:
         except Exception as exc:
             raise PermanentJobError("Malformed raw webhook payload stored in receipt") from exc
 
-        client = self.get_paypal_client()
+        conn_repo = ConnectionRepository(session)
+        environment = payload.get("environment") or getattr(receipt, "environment", "sandbox")
+        conn = conn_repo.get_connection(tenant_id, provider="paypal", environment=environment)
+        client = self.resolve_paypal_client_for_connection(conn) if conn else self.get_paypal_client()
         workflow = StorageWorkflow(session)
         resource = event_data.get("resource") or {}
 
