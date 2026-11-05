@@ -9,7 +9,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError, ConflictError, StaleVersionError
-from ..schema import InvoiceRecord, AllocationRecord
+from ..schema import InvoiceRecord, AllocationRecord, ProviderSettlementRecord
 
 
 class IneligibleInvoiceError(Exception):
@@ -130,6 +130,17 @@ class InvoiceRepository(BaseRepository[InvoiceRecord]):
         )
         return self.session.scalars(stmt).first()
 
+    def get_by_number(
+        self, tenant_id: str, provider: str, invoice_number: str
+    ) -> Optional[InvoiceRecord]:
+        stmt = select(InvoiceRecord).where(
+            InvoiceRecord.tenant_id == tenant_id,
+            InvoiceRecord.provider == provider,
+            InvoiceRecord.invoice_number == invoice_number,
+        )
+        return self.session.scalars(stmt).first()
+
+
     def list_invoices(
         self, tenant_id: str, status: Optional[str] = None
     ) -> Sequence[InvoiceRecord]:
@@ -147,17 +158,27 @@ class InvoiceRepository(BaseRepository[InvoiceRecord]):
         )
         return int(self.session.scalar(stmt) or 0)
 
+    def get_total_settled_minor(self, tenant_id: str, invoice_id: str) -> int:
+        """Sum of all externally reported provider settlements on this invoice."""
+        stmt = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
+            ProviderSettlementRecord.tenant_id == tenant_id,
+            ProviderSettlementRecord.invoice_id == invoice_id,
+        )
+        return int(self.session.scalar(stmt) or 0)
+
     def get_ledger_outstanding_minor(self, tenant_id: str, invoice_id: str) -> int:
         """Application-owned ledger balance:
-        outstanding = invoice.total_minor - sum(approved allocations).
+        outstanding = invoice.total_minor - sum(approved allocations) - sum(provider settlements).
 
-        This is distinct from provider-reported provider_due_minor.
+        This accounts for both application approvals and provider-reported settlements
+        without double counting.
         """
         invoice = self.get_invoice(tenant_id, invoice_id)
         if invoice is None:
             raise EntityNotFoundError(f"Invoice '{invoice_id}' not found for tenant '{tenant_id}'")
         allocated = self.get_total_allocated_minor(tenant_id, invoice_id)
-        return max(0, invoice.total_minor - allocated)
+        settled = self.get_total_settled_minor(tenant_id, invoice_id)
+        return max(0, invoice.total_minor - (allocated + settled))
 
     def validate_eligibility_for_allocation(self, invoice: InvoiceRecord) -> None:
         """Invariant I8: DRAFT, CANCELLED and PAID invoices are ineligible for new allocations."""

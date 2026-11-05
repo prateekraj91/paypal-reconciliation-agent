@@ -76,6 +76,7 @@ def reconcile_payments(
     invoice_source: InvoiceSource | Any,
     matcher: Optional[Matcher] = None,
     existing_allocations: Optional[Sequence[PaymentAllocation]] = None,
+    provider_settlements: Optional[Sequence[PaymentAllocation]] = None,
 ) -> ReconciliationRunResult:
     """Execute end-to-end reconciliation for a batch of payments against an invoice source.
 
@@ -89,7 +90,7 @@ def reconcile_payments(
        are combined and deduplicated by payment_id to prevent double deductions.
 
     3. Matching:
-       Runs `matcher.match(payments, invoices, approved=approved_allocations)`.
+       Runs `matcher.match(payments, invoices, approved=approved_allocations, settlements=settled_allocations)`.
        Defaults to DeterministicMatcher() if no matcher is supplied.
 
     4. Independent Verification:
@@ -125,12 +126,20 @@ def reconcile_payments(
     combined_allocs: list[PaymentAllocation] = [
         alloc for alloc in deduped_allocs if alloc.status is AllocationStatus.APPROVED
     ]
+    settled_allocs: Sequence[PaymentAllocation] = tuple(provider_settlements or ())
 
     # 3. Matcher execution
     active_matcher = matcher or DeterministicMatcher()
-    proposals = active_matcher.match(
-        payments, ingested_invoices, approved=combined_allocs
-    )
+    import inspect
+    matcher_sig = inspect.signature(active_matcher.match)
+    if "settlements" in matcher_sig.parameters:
+        proposals = active_matcher.match(
+            payments, ingested_invoices, approved=combined_allocs, settlements=settled_allocs
+        )
+    else:
+        proposals = active_matcher.match(
+            payments, ingested_invoices, approved=combined_allocs
+        )
 
     # 4. Independent verification
     proposed_only = [p for p in proposals if p.outcome is MatchOutcome.PROPOSED]

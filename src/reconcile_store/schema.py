@@ -306,6 +306,15 @@ class ReconciliationRunRecord(Base):
         back_populates="run", cascade="all, delete-orphan"
     )
 
+    @property
+    def metrics(self) -> dict[str, Any]:
+        """Parsed dictionary representation of metrics_json."""
+        try:
+            return json.loads(self.metrics_json) if self.metrics_json else {}
+        except Exception:
+            return {}
+
+
 
 # --------------------------------------------------------------------------
 # 7. Proposals
@@ -417,13 +426,54 @@ class AllocationRecord(Base):
     invoice_id: Mapped[str] = mapped_column(String(64), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=False, index=True)
     amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    decision_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("decisions.id", ondelete="SET NULL"), nullable=True)
+    decision_id: Mapped[str] = mapped_column(String(64), ForeignKey("decisions.id", ondelete="RESTRICT"), nullable=False)
     actor: Mapped[str] = mapped_column(String(255), nullable=False)
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     allocated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "payment_id", "invoice_id", name="uq_allocation_tenant_pay_inv"),
+    )
+
+    def to_domain(self, provider_payment_id: str, provider_invoice_id: str) -> PaymentAllocation:
+        return PaymentAllocation(
+            payment_id=provider_payment_id,
+            invoice_id=provider_invoice_id,
+            amount_cents=self.amount_minor,
+            status=AllocationStatus.APPROVED,
+            currency=self.currency,
+        )
+
+
+# --------------------------------------------------------------------------
+# 11b. Provider Settlements (Externally Reported Financial Facts)
+# --------------------------------------------------------------------------
+
+
+class ProviderSettlementRecord(Base):
+    __tablename__ = "provider_settlements"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _gen_id("psett"))
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="paypal")
+    environment: Mapped[str] = mapped_column(String(32), nullable=False, default="sandbox")
+    provider_settlement_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    invoice_id: Mapped[str] = mapped_column(String(64), ForeignKey("invoices.id", ondelete="CASCADE"), nullable=False, index=True)
+    payment_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("payments.id", ondelete="SET NULL"), nullable=True, index=True)
+    amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_record_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("provider_records.id", ondelete="SET NULL"), nullable=True)
+    settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "environment", "invoice_id", "provider_settlement_id",
+            name="uq_provider_settlement_tenant_prov_env_inv_id",
+        ),
+        Index("ix_provider_settlements_tenant_invoice", "tenant_id", "invoice_id"),
+        Index("ix_provider_settlements_tenant_payment", "tenant_id", "payment_id"),
     )
 
     def to_domain(self, provider_payment_id: str, provider_invoice_id: str) -> PaymentAllocation:
@@ -462,3 +512,89 @@ class AuditEventRecord(Base):
         UniqueConstraint("tenant_id", "event_hash", name="uq_audit_event_tenant_hash"),
         Index("ix_audit_event_lookup", "tenant_id", "sequence_number"),
     )
+
+
+# --------------------------------------------------------------------------
+# 13. Jobs (Database-Backed Background Job Queue)
+# --------------------------------------------------------------------------
+
+
+class JobRecord(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _gen_id("job"))
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_type: Mapped[str] = mapped_column(String(64), nullable=False)  # "WEBHOOK_INGEST", "MANUAL_SYNC"
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)  # QUEUED, RUNNING, RETRY, COMPLETED, FAILED
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    worker_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_jobs_tenant_idempotency_key"),
+        Index("ix_jobs_queue_poll", "status", "available_at"),
+        Index("ix_jobs_tenant_status", "tenant_id", "status"),
+    )
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        if not self.payload_json:
+            return {}
+        try:
+            return json.loads(self.payload_json)
+        except Exception:
+            return {}
+
+
+# --------------------------------------------------------------------------
+# 14. Webhook Inbox (Durable Inbound Provider Webhooks)
+# --------------------------------------------------------------------------
+
+
+class WebhookInboxRecord(Base):
+    __tablename__ = "webhook_inbox"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _gen_id("wh"))
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(32), default="paypal", nullable=False)
+    environment: Mapped[str] = mapped_column(String(32), default="sandbox", nullable=False)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    webhook_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    raw_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    headers_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    verification_status: Mapped[str] = mapped_column(String(32), default="RECEIVED", nullable=False)
+    processing_status: Mapped[str] = mapped_column(String(32), default="RECEIVED", nullable=False)
+    job_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    job: Mapped[Optional["JobRecord"]] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "environment", "event_id", name="uq_webhook_inbox_tenant_prov_env_evt"),
+        Index("ix_webhook_inbox_lookup", "tenant_id", "processing_status"),
+    )
+
+    @property
+    def headers(self) -> dict[str, Any]:
+        if not self.headers_json:
+            return {}
+        try:
+            return json.loads(self.headers_json)
+        except Exception:
+            return {}

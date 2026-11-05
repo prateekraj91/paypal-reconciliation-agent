@@ -36,7 +36,10 @@ from .repositories import (
     VerificationRepository,
     DecisionRepository,
     AllocationRepository,
+    ProviderSettlementRepository,
     AuditRepository,
+    WebhookInboxRepository,
+    JobRepository,
     RepositoryError,
     EntityNotFoundError,
     ConflictError,
@@ -44,6 +47,7 @@ from .repositories import (
     TenantIsolationError,
     ConflictingSourceRecordError,
 )
+from .schema import ProviderSettlementRecord
 
 __all__ = [
     "DatabaseConfig",
@@ -51,6 +55,7 @@ __all__ = [
     "get_engine",
     "session_scope",
     "Base",
+    "ProviderSettlementRecord",
     "canonical_json",
     "hash_content",
     "GENESIS_HASH",
@@ -74,7 +79,10 @@ __all__ = [
     "VerificationRepository",
     "DecisionRepository",
     "AllocationRepository",
+    "ProviderSettlementRepository",
     "AuditRepository",
+    "WebhookInboxRepository",
+    "JobRepository",
     "RepositoryError",
     "EntityNotFoundError",
     "ConflictError",

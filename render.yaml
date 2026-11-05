@@ -1,0 +1,66 @@
+# Render Blueprint Specification for PayPal Reconciliation Agent
+# Defines managed PostgreSQL, FastAPI web service with release migrations, and background worker.
+
+databases:
+  - name: reconcile-db
+    databaseName: reconcile_prod
+    user: reconcile_user
+    plan: starter
+    region: oregon
+
+services:
+  # 1. Public FastAPI Web Service
+  - type: web
+    name: reconcile-api
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install --upgrade pip && pip install ".[store,api]"
+    preDeployCommand: alembic upgrade head && python -m reconcile_store.bootstrap
+    startCommand: uvicorn reconcile_api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: RECONCILE_DB_URL
+        fromDatabase:
+          name: reconcile-db
+          property: connectionString
+      - key: PAYPAL_ENVIRONMENT
+        value: sandbox
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: DEFAULT_TENANT_ID
+        value: tenant_paypal_sandbox_us
+
+  # 2. Asynchronous Background Worker Service
+  - type: worker
+    name: reconcile-worker
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install --upgrade pip && pip install ".[store,api]"
+    startCommand: python -m reconcile_worker
+    autoDeploy: false
+    envVars:
+      - key: RECONCILE_DB_URL
+        fromDatabase:
+          name: reconcile-db
+          property: connectionString
+      - key: PAYPAL_ENVIRONMENT
+        value: sandbox
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: DEFAULT_TENANT_ID
+        value: tenant_paypal_sandbox_us

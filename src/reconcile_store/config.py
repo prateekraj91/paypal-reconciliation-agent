@@ -20,14 +20,21 @@ class DatabaseConfig:
     @classmethod
     def from_env(cls, default_url: Optional[str] = None) -> "DatabaseConfig":
         """Resolve database configuration from environment variables."""
+        from reconcile.paypal import load_dotenv
+        load_dotenv()
         url = (
             os.environ.get("DATABASE_URL")
             or os.environ.get("RECONCILE_DB_URL")
             or default_url
             or "sqlite:///recon.db"
         )
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
         echo = os.environ.get("DATABASE_ECHO", "").lower() in ("1", "true", "yes")
         return cls(url=url, echo=echo)
+
 
     @property
     def is_sqlite(self) -> bool:

@@ -38,10 +38,12 @@ class MatchRun:
         self,
         invoices: Sequence[Invoice],
         approved: Sequence[PaymentAllocation] = (),
+        settlements: Sequence[PaymentAllocation] = (),
     ) -> None:
         self.invoices: list[Invoice] = list(invoices)
+        all_deductions = list(approved) + list(settlements)
         self.outstanding: dict[str, int] = {
-            i.invoice_id: cross_check_invoice_balance(i, approved)
+            i.invoice_id: cross_check_invoice_balance(i, all_deductions)
             for i in self.invoices
         }
         self.by_ref: dict[str, list[Invoice]] = {}
@@ -52,6 +54,9 @@ class MatchRun:
         self.conflicted: set[str] = set()  # payment_ids whose deliveries contradict
         self.approved_payment_ids: set[str] = {
             a.payment_id for a in approved if a.status is AllocationStatus.APPROVED
+        }
+        self.settled_payment_ids: set[str] = {
+            s.payment_id for s in settlements
         }
 
     # ------------------------------------------------------------------

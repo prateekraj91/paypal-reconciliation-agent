@@ -74,7 +74,7 @@ class AllocationStatus(str, Enum):
 class ReconciliationStatus(str, Enum):
     """Where a payment sits in our workflow.
 
-    Matchers can only produce UNMATCHED, PROPOSED or NEEDS_REVIEW.
+    Matchers can produce UNMATCHED, PROPOSED, NEEDS_REVIEW, or EXTERNALLY_RECONCILED.
     RECONCILED is reserved for the future ledger: it requires an approved
     allocation AND a passing verification against PayPal.
     """
@@ -83,12 +83,14 @@ class ReconciliationStatus(str, Enum):
     PROPOSED = "PROPOSED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     RECONCILED = "RECONCILED"
+    EXTERNALLY_RECONCILED = "EXTERNALLY_RECONCILED"
 
 
 class MatchOutcome(str, Enum):
     PROPOSED = "PROPOSED"  # exactly one candidate allocation
     AMBIGUOUS = "AMBIGUOUS"  # two or more plausible candidates, no winner
     NO_MATCH = "NO_MATCH"  # nothing proposed
+    PROVIDER_SETTLED = "PROVIDER_SETTLED"  # payment settled externally by billing provider
 
 
 class EvidenceCode(str, Enum):
@@ -105,6 +107,7 @@ class EvidenceCode(str, Enum):
     DUPLICATE_EVENT = "DUPLICATE_EVENT"
     MULTIPLE_CANDIDATES = "MULTIPLE_CANDIDATES"
     NO_CANDIDATE = "NO_CANDIDATE"
+    PROVIDER_SETTLED = "PROVIDER_SETTLED"
 
 
 # --------------------------------------------------------------------------
@@ -258,7 +261,7 @@ class MatchProposal:
         elif self.outcome is MatchOutcome.AMBIGUOUS:
             _require(n >= 2, "AMBIGUOUS requires at least two candidates")
         else:
-            _require(n == 0, "NO_MATCH must not carry candidates")
+            _require(n == 0, f"{self.outcome.value} must not carry candidates")
         _require(
             all(c.payment_id == self.payment_id for c in self.candidates),
             "candidate belongs to a different payment",
@@ -266,6 +269,10 @@ class MatchProposal:
 
     @property
     def initial_status(self) -> ReconciliationStatus:
+        if self.outcome is MatchOutcome.PROVIDER_SETTLED or any(
+            e.code is EvidenceCode.PROVIDER_SETTLED for e in self.reasons
+        ):
+            return ReconciliationStatus.EXTERNALLY_RECONCILED
         return {
             MatchOutcome.PROPOSED: ReconciliationStatus.PROPOSED,
             MatchOutcome.AMBIGUOUS: ReconciliationStatus.NEEDS_REVIEW,

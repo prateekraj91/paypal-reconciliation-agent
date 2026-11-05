@@ -113,6 +113,8 @@ class SyncResult:
     proposals: tuple[MatchProposal, ...] = ()
     verification: tuple[VerificationResult, ...] = ()
     transaction_evidence: Mapping[str, dict] = field(default_factory=dict)
+    invoice_evidence: Mapping[str, dict] = field(default_factory=dict)
+    embedded_payment_evidence: Mapping[str, dict] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -231,6 +233,9 @@ def run_sync(
         accounting_errors=tuple(accounting_errors),
     )
 
+    inv_evidence = dict(getattr(connector, "invoice_evidence", {}))
+    embedded_evidence = dict(getattr(connector, "embedded_payment_evidence", {}))
+
     return SyncResult(
         report=report,
         invoices=invoices,
@@ -239,4 +244,6 @@ def run_sync(
         proposals=proposals,
         verification=verification,
         transaction_evidence=evidence,
+        invoice_evidence=inv_evidence,
+        embedded_payment_evidence=embedded_evidence,
     )
