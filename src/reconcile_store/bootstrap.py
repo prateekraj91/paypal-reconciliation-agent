@@ -93,7 +93,7 @@ def main() -> None:
     parser.add_argument("--credential-ref", type=str, default=None, help="Indirect credential reference (e.g. env:PAYPAL_SANDBOX)")
     args = parser.parse_args()
 
-    engine = DatabaseEngine(DatabaseConfig.from_env())
+    engine = DatabaseEngine(DatabaseConfig.from_env(primary_env_var="MIGRATION_DB_URL"))
     with engine.session() as session:
         try:
             tenant, conn = bootstrap_database(

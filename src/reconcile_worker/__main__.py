@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 from typing import Any
@@ -30,27 +31,31 @@ def main() -> None:
         action="store_true",
         help="Process one eligible job and exit immediately",
     )
+    default_poll = float(os.environ.get("WORKER_POLL_INTERVAL", "2.0"))
+    default_lease = int(os.environ.get("WORKER_LEASE_DURATION", "60"))
+    default_tenant = os.environ.get("DEFAULT_TENANT_ID") or None
+
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=1.0,
-        help="Seconds to sleep when no jobs are available (default: 1.0)",
+        default=default_poll,
+        help=f"Seconds to sleep when no jobs are available (default: {default_poll})",
     )
     parser.add_argument(
         "--lease-duration",
         type=int,
-        default=60,
-        help="Worker lease duration in seconds (default: 60)",
+        default=default_lease,
+        help=f"Worker lease duration in seconds (default: {default_lease})",
     )
     parser.add_argument(
         "--tenant-id",
         type=str,
-        default=None,
+        default=default_tenant,
         help="Optional tenant ID to restrict processing to",
     )
     args = parser.parse_args()
 
-    db_engine = DatabaseEngine(DatabaseConfig.from_env())
+    db_engine = DatabaseEngine(DatabaseConfig.for_worker())
     worker = Worker(
         db_engine=db_engine,
         poll_interval=args.poll_interval,
