@@ -53,6 +53,9 @@ app = FastAPI(
     version="0.1.0",
     description="D4 Verified Webhook Ingestion, Background Processing and Reconciliation API",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 REQUIRED_PAYPAL_HEADERS = (
