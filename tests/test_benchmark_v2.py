@@ -11,6 +11,8 @@ from reconcile.benchmark_v2 import (
     ScenarioGroup,
     evaluate_matcher_v2,
     format_benchmark_v2_table,
+    format_confusion_matrix,
+    format_scenario_breakdown,
     generate_benchmark_v2,
 )
 from reconcile.deterministic import DeterministicMatcher
@@ -31,16 +33,39 @@ def matchers():
 
 
 def test_benchmark_v2_dataset_structure():
-    dataset = generate_benchmark_v2(seed=42, split="train")
+    dataset = generate_benchmark_v2(seed=42, split="train", cases_per_group=8)
     assert len(dataset.invoices) > 0
     assert len(dataset.payments) > 0
-    assert len(dataset.truth) == 14
+    assert len(dataset.truth) == 14 * 8
+    assert len(dataset.truth) >= 100
 
     # Verify all 14 scenario groups are covered
     covered = {gt.scenario_group for gt in dataset.truth.values()}
     assert len(covered) == 14
     for sg in ScenarioGroup:
         assert sg in covered
+
+
+def test_train_holdout_separation():
+    """Verify train and holdout splits are strictly disjoint across IDs, numbers, and entities."""
+    train_ds = generate_benchmark_v2(seed=42, split="train", cases_per_group=8)
+    holdout_ds = generate_benchmark_v2(seed=42, split="holdout", cases_per_group=8)
+
+    train_inv_ids = {inv.invoice_id for inv in train_ds.invoices}
+    holdout_inv_ids = {inv.invoice_id for inv in holdout_ds.invoices}
+    assert train_inv_ids.isdisjoint(holdout_inv_ids), "Invoice IDs overlap between train and holdout!"
+
+    train_pay_ids = {p.payment_id for p in train_ds.payments}
+    holdout_pay_ids = {p.payment_id for p in holdout_ds.payments}
+    assert train_pay_ids.isdisjoint(holdout_pay_ids), "Payment IDs overlap between train and holdout!"
+
+    train_inv_nums = {inv.number for inv in train_ds.invoices}
+    holdout_inv_nums = {inv.number for inv in holdout_ds.invoices}
+    assert train_inv_nums.isdisjoint(holdout_inv_nums), "Invoice numbers overlap between train and holdout!"
+
+    train_emails = {inv.customer_email for inv in train_ds.invoices}
+    holdout_emails = {inv.customer_email for inv in holdout_ds.invoices}
+    assert train_emails.isdisjoint(holdout_emails), "Customer emails overlap between train and holdout!"
 
 
 @pytest.mark.parametrize("seed", TRAIN_SEEDS)
@@ -116,3 +141,26 @@ def test_quantitative_matcher_comparison(matchers):
 
     ctx_det = det_metrics.scenario_breakdown[ScenarioGroup.CONTEXTUAL_MATCH.value]
     assert ctx_det["correct"] == 0  # Deterministic does not do contextual matching without ref
+
+
+def test_confusion_matrix_and_breakdown_formatting():
+    """Verify confusion matrix and scenario breakdown formatting on the expanded dataset."""
+    dataset = generate_benchmark_v2(seed=20, split="train", cases_per_group=8)
+    matcher = AdvancedMatcher()
+    metrics = evaluate_matcher_v2(matcher, dataset)
+
+    # Check confusion matrix sums
+    cm = metrics.confusion_matrix
+    total_in_cm = sum(sum(row.values()) for row in cm.values())
+    assert total_in_cm == metrics.total_cases
+    assert total_in_cm >= 100
+
+    # Format tables and verify non-empty headers and rows
+    cm_table = format_confusion_matrix(metrics)
+    assert "PROPOSED" in cm_table
+    assert "AMBIGUOUS" in cm_table
+    assert "NO_MATCH" in cm_table
+
+    breakdown_table = format_scenario_breakdown(metrics)
+    for sg in ScenarioGroup:
+        assert sg.value in breakdown_table

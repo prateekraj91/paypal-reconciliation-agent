@@ -3,6 +3,17 @@
 from .advanced import AdvancedMatcher
 from .ambiguity import build_ambiguity_certificate, create_ambiguous_proposal
 from .baseline import BaselineConfig, BaselineMatcher
+from .benchmark_v2 import (
+    BenchmarkV2Dataset,
+    BenchmarkV2Metrics,
+    GroundTruthV2,
+    ScenarioGroup,
+    evaluate_matcher_v2,
+    format_benchmark_v2_table,
+    format_confusion_matrix,
+    format_scenario_breakdown,
+    generate_benchmark_v2,
+)
 from .dataset import CaseCategory, Dataset, GroundTruth, Resolution, generate_dataset
 from .delivery import (
     IMMUTABLE_DELIVERY_FIELDS,
@@ -46,6 +57,7 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     PaymentStatus,
     ReconciliationStatus,
     Refund,

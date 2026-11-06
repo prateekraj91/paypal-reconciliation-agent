@@ -89,7 +89,7 @@ def test_over_refund_fails_closed():
     # Refund of $1,200 on a $1,000 payment
     refund = make_refund("ref_1", "pay_1", 120000, invoice_id=invoice.invoice_id)
 
-    with pytest.raises(AccountingError, match="Total refunds .* exceed approved allocations"):
+    with pytest.raises(AccountingError, match="Total returns .* exceed approved allocations"):
         outstanding_cents(invoice, [alloc], refunds=[refund])
 
 
@@ -100,3 +100,94 @@ def test_cross_currency_refund_fails_closed():
 
     with pytest.raises(AccountingError, match="Currency mismatch for refund"):
         outstanding_cents(invoice, [alloc], refunds=[refund])
+
+
+def test_full_refund_against_provider_settled_payment():
+    """Verify that an invoice settled directly by PayPal (ProviderSettlement) has its balance restored upon full refund."""
+    invoice = inv(1, 75000)  # $750 invoice
+    # External PayPal settlement
+    settlement_alloc = PaymentAllocation(
+        payment_id="pay_paypal_settled_1",
+        invoice_id=invoice.invoice_id,
+        amount_cents=75000,
+        status=AllocationStatus.APPROVED,
+        currency="USD",
+    )
+    # Before refund: fully settled ($0 outstanding)
+    assert outstanding_cents(invoice, [settlement_alloc]) == 0
+
+    # Merchant refunds the PayPal settlement
+    refund = Refund(
+        refund_id="ref_paypal_1",
+        parent_payment_id="pay_paypal_settled_1",
+        amount_cents=75000,
+        currency="USD",
+        refunded_at=datetime.now(timezone.utc),
+        invoice_id=invoice.invoice_id,
+        target_type="SETTLEMENT",
+        settlement_id="set_rec_001",
+    )
+    # Balance is fully restored to $750
+    assert outstanding_cents(invoice, [settlement_alloc], refunds=[refund]) == 75000
+
+
+def test_partial_refund_against_provider_settled_payment():
+    """Verify partial refund against an externally settled PayPal invoice restores exact partial capacity."""
+    invoice = inv(1, 150000)  # $1,500 invoice
+    settlement_alloc = PaymentAllocation(
+        payment_id="pay_paypal_settled_2",
+        invoice_id=invoice.invoice_id,
+        amount_cents=150000,
+        status=AllocationStatus.APPROVED,
+        currency="USD",
+    )
+    # Partial refund of $450
+    refund = Refund(
+        refund_id="ref_paypal_part_1",
+        parent_payment_id="pay_paypal_settled_2",
+        amount_cents=45000,
+        currency="USD",
+        refunded_at=datetime.now(timezone.utc),
+        invoice_id=invoice.invoice_id,
+        target_type="SETTLEMENT",
+        settlement_id="set_rec_002",
+    )
+    # Outstanding balance should now be $450
+    assert outstanding_cents(invoice, [settlement_alloc], refunds=[refund]) == 45000
+
+
+def test_independent_accounting_of_settlements_and_allocations_with_refunds():
+    """Verify provider settlements and application allocations remain distinct and do not conflate during refund calculations."""
+    invoice = inv(1, 200000)  # $2,000 invoice
+    # $800 settled via PayPal external settlement
+    settlement_alloc = PaymentAllocation(
+        payment_id="pay_settle_ext",
+        invoice_id=invoice.invoice_id,
+        amount_cents=80000,
+        status=AllocationStatus.APPROVED,
+        currency="USD",
+    )
+    # $1,200 allocated via application approval
+    app_alloc = make_alloc("pay_app_internal", invoice.invoice_id, 120000)
+
+    # Gross deductions = $2,000 -> balance $0
+    assert outstanding_cents(invoice, [settlement_alloc, app_alloc]) == 0
+
+    # Refund against the application allocation only ($300)
+    refund_app = Refund(
+        refund_id="ref_app_1",
+        parent_payment_id="pay_app_internal",
+        amount_cents=30000,
+        currency="USD",
+        refunded_at=datetime.now(timezone.utc),
+        invoice_id=invoice.invoice_id,
+        target_type="ALLOCATION",
+        allocation_id="alloc_rec_001",
+    )
+    # Net deductions: 200,000 - 30,000 = 170,000 -> Outstanding = 30,000
+    assert outstanding_cents(invoice, [settlement_alloc, app_alloc], refunds=[refund_app]) == 30000
+
+    # Cross-check invoice balance raises AccountingError if PayPal due_amount contradicts
+    invoice_contradicting = inv(1, 200000, due_amount_cents=0)  # PayPal claims 0 due, but ledger says 30,000
+    with pytest.raises(AccountingError, match="Accounting inconsistency for invoice"):
+        cross_check_invoice_balance(invoice_contradicting, [settlement_alloc, app_alloc], refunds=[refund_app])
