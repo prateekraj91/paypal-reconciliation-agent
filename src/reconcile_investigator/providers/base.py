@@ -16,11 +16,11 @@ class InvestigationContext:
     tenant_id: str
     target_type: str
     target_id: str
-    target_data: Dict[str, Any]
-    evidence_records: List[Dict[str, Any]]
-    candidate_invoices: List[Dict[str, Any]]
-    related_events: Dict[str, Any]
-    missing_evidence: List[Dict[str, Any]]
+    target_data: Dict[str, Any] = field(default_factory=dict)
+    evidence_records: List[Dict[str, Any]] = field(default_factory=list)
+    candidate_invoices: List[Dict[str, Any]] = field(default_factory=list)
+    related_events: Dict[str, Any] = field(default_factory=dict)
+    missing_evidence: List[Dict[str, Any]] = field(default_factory=list)
     suspected_prompt_injection: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 

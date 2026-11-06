@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -154,6 +154,14 @@ class SuggestedResolution(BaseModel):
     resolution_type: str = Field(..., description="Category of suggested resolution")
     suggested_invoice_ids: List[str] = Field(default_factory=list, description="Invoices to allocate against, if applicable")
     suggested_amount_cents: Optional[int] = Field(default=None, description="Suggested allocation amount in cents")
+    suggested_allocations: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Optional per-invoice allocation distribution {invoice_id: amount_cents} for split payments",
+    )
+    is_aggregate_amount: bool = Field(
+        default=True,
+        description="Whether suggested_amount_cents represents the aggregate amount across all suggested invoices",
+    )
     notes: str = Field(default="", description="Operator guidance for performing the resolution")
 
 

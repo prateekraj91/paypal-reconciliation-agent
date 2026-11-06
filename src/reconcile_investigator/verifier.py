@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import Session
 
 from reconcile_store.schema import (
@@ -27,8 +27,18 @@ from reconcile_store.schema import (
     ProviderRecord,
     AuditEventRecord,
 )
-from reconcile.models import outstanding_cents
+from reconcile.models import (
+    PaymentAllocation,
+    PaymentReversal,
+    Refund,
+    outstanding_cents,
+)
 from .models import InvestigationResult, VerifierStatus, EvidenceReference
+
+
+class LedgerReconstructionError(Exception):
+    """Raised when authoritative ledger balance cannot be calculated due to corruption or mismatch."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -158,41 +168,136 @@ class IndependentSafetyVerifier:
                     "all resolutions must be proposed recommendations only"
                 )
 
-            # Check capacity on target invoices
-            if sr.suggested_amount_cents is not None and sr.suggested_amount_cents > 0:
+            # Invariant: Human review MUST be required for any suggested resolution
+            if not result.requires_human_review:
+                capacity_passed = False
+                issues.append("requires_human_review is False despite suggested financial action")
+
+            # Check target payment capacity if target is payment
+            pay_rec = None
+            pay_remaining: Optional[int] = None
+            if result.target_type == "payment":
+                pay_rec = self._get_payment(result.target_id)
+                if pay_rec:
+                    pay_remaining = self.calculate_payment_remaining_capacity(pay_rec)
+                    if pay_remaining < 0:
+                        capacity_passed = False
+                        issues.append(
+                            f"Target payment {pay_rec.provider_payment_id} has negative available capacity ({pay_remaining} cents)"
+                        )
+
+            # Validate allocation distribution and invoice capacities
+            if sr.suggested_allocations:
+                total_dist = sum(sr.suggested_allocations.values())
+                if sr.suggested_amount_cents is not None and total_dist != sr.suggested_amount_cents:
+                    capacity_passed = False
+                    issues.append(
+                        f"Sum of suggested allocations ({total_dist} cents) contradicts "
+                        f"suggested_amount_cents ({sr.suggested_amount_cents} cents)"
+                    )
+                if pay_remaining is not None and total_dist > pay_remaining:
+                    capacity_passed = False
+                    issues.append(
+                        f"Total suggested allocations ({total_dist} cents) exceed "
+                        f"remaining payment capacity ({pay_remaining} cents) for payment {pay_rec.provider_payment_id if pay_rec else ''}"
+                    )
+                for inv_id, alloc_amt in sr.suggested_allocations.items():
+                    if alloc_amt <= 0:
+                        capacity_passed = False
+                        issues.append(f"Suggested allocation to invoice '{inv_id}' must be positive ({alloc_amt} cents given)")
+                        continue
+                    inv_rec = self._get_invoice(inv_id)
+                    if not inv_rec:
+                        capacity_passed = False
+                        issues.append(f"Suggested resolution references non-existent invoice '{inv_id}'")
+                        continue
+                    try:
+                        cur_outstanding = self.calculate_authoritative_outstanding_balance(inv_rec)
+                    except LedgerReconstructionError as exc:
+                        capacity_passed = False
+                        issues.append(str(exc))
+                        continue
+                    if alloc_amt > cur_outstanding:
+                        capacity_passed = False
+                        issues.append(
+                            f"Suggested allocation of {alloc_amt} cents exceeds available invoice capacity "
+                            f"({cur_outstanding} cents) for invoice {inv_rec.invoice_number}"
+                        )
+
+            elif len(sr.suggested_invoice_ids) > 1:
+                # Multiple invoices without explicit per-invoice mapping
+                invoice_capacities: Dict[str, int] = {}
                 for inv_id in sr.suggested_invoice_ids:
                     inv_rec = self._get_invoice(inv_id)
                     if not inv_rec:
                         capacity_passed = False
                         issues.append(f"Suggested resolution references non-existent invoice '{inv_id}'")
                         continue
-
-                    # Check invoice currency
-                    inv_domain = inv_rec.to_domain()
-                    stmt_allocs = select(AllocationRecord).where(
-                        AllocationRecord.tenant_id == self.tenant_id,
-                        AllocationRecord.invoice_id == inv_rec.id,
-                    )
-                    allocs = [
-                        a.to_domain("P", inv_rec.provider_invoice_id)
-                        for a in self.session.scalars(stmt_allocs).all()
-                    ]
                     try:
-                        cur_outstanding = outstanding_cents(inv_domain, allocs)
-                    except Exception:
-                        cur_outstanding = inv_rec.total_minor
-
-                    if sr.suggested_amount_cents > cur_outstanding:
+                        cur_outstanding = self.calculate_authoritative_outstanding_balance(inv_rec)
+                        invoice_capacities[inv_id] = cur_outstanding
+                    except LedgerReconstructionError as exc:
                         capacity_passed = False
-                        issues.append(
-                            f"Suggested allocation of {sr.suggested_amount_cents} cents exceeds available "
-                            f"invoice capacity ({cur_outstanding} cents) for invoice {inv_rec.invoice_number}"
-                        )
+                        issues.append(str(exc))
 
-            # Invariant: Human review MUST be required for any suggested resolution
-            if not result.requires_human_review:
-                capacity_passed = False
-                issues.append("requires_human_review is False despite suggested financial action")
+                if sr.suggested_amount_cents is not None and sr.suggested_amount_cents > 0:
+                    if sr.is_aggregate_amount:
+                        total_inv_cap = sum(invoice_capacities.values())
+                        if sr.suggested_amount_cents > total_inv_cap:
+                            capacity_passed = False
+                            issues.append(
+                                f"Aggregate suggested allocation of {sr.suggested_amount_cents} cents exceeds combined "
+                                f"available capacity ({total_inv_cap} cents) across suggested invoices"
+                            )
+                        if pay_remaining is not None and sr.suggested_amount_cents > pay_remaining:
+                            capacity_passed = False
+                            issues.append(
+                                f"Aggregate suggested allocation of {sr.suggested_amount_cents} cents exceeds "
+                                f"remaining payment capacity ({pay_remaining} cents)"
+                            )
+                    else:
+                        for inv_id, cap in invoice_capacities.items():
+                            if sr.suggested_amount_cents > cap:
+                                capacity_passed = False
+                                issues.append(
+                                    f"Per-invoice suggested allocation of {sr.suggested_amount_cents} cents exceeds "
+                                    f"capacity ({cap} cents) for invoice '{inv_id}'"
+                                )
+                        total_per_inv = sr.suggested_amount_cents * len(sr.suggested_invoice_ids)
+                        if pay_remaining is not None and total_per_inv > pay_remaining:
+                            capacity_passed = False
+                            issues.append(
+                                f"Total per-invoice allocations ({total_per_inv} cents) exceed "
+                                f"remaining payment capacity ({pay_remaining} cents)"
+                            )
+
+            elif len(sr.suggested_invoice_ids) == 1:
+                inv_id = sr.suggested_invoice_ids[0]
+                inv_rec = self._get_invoice(inv_id)
+                if not inv_rec:
+                    capacity_passed = False
+                    issues.append(f"Suggested resolution references non-existent invoice '{inv_id}'")
+                else:
+                    try:
+                        cur_outstanding = self.calculate_authoritative_outstanding_balance(inv_rec)
+                    except LedgerReconstructionError as exc:
+                        capacity_passed = False
+                        issues.append(str(exc))
+                        cur_outstanding = -1
+
+                    if sr.suggested_amount_cents is not None and sr.suggested_amount_cents > 0:
+                        if cur_outstanding >= 0 and sr.suggested_amount_cents > cur_outstanding:
+                            capacity_passed = False
+                            issues.append(
+                                f"Suggested allocation of {sr.suggested_amount_cents} cents exceeds available "
+                                f"invoice capacity ({cur_outstanding} cents) for invoice {inv_rec.invoice_number}"
+                            )
+                        if pay_remaining is not None and sr.suggested_amount_cents > pay_remaining:
+                            capacity_passed = False
+                            issues.append(
+                                f"Suggested allocation of {sr.suggested_amount_cents} cents exceeds remaining "
+                                f"payment capacity ({pay_remaining} cents) for payment {pay_rec.provider_payment_id if pay_rec else ''}"
+                            )
 
         checked_invariants["financial_capacity_safe"] = capacity_passed
 
@@ -218,8 +323,8 @@ class IndependentSafetyVerifier:
         # Determine overall verdict
         all_passed = all(checked_invariants.values())
         if all_passed:
-            # If there are hypotheses or risk flags, status is NEEDS_REVIEW (requires human operator verification)
-            if result.hypotheses or result.risk_flags or result.conflicting_evidence:
+            # If there are hypotheses, risk flags, or a proposed resolution, status is NEEDS_REVIEW
+            if result.hypotheses or result.risk_flags or result.conflicting_evidence or result.suggested_resolution:
                 final_status = VerifierStatus.NEEDS_REVIEW
                 summary = "All authoritative financial evidence verified. Case has discrepancies requiring human review."
             else:
@@ -287,7 +392,7 @@ class IndependentSafetyVerifier:
         return False
 
     def _verify_single_evidence(self, ev: EvidenceReference, issues: List[str]) -> bool:
-        """Verify that a single cited evidence reference exists in the database and matches amounts."""
+        """Verify that a single cited evidence reference exists in the database and matches amounts and currencies."""
         if ev.source_type == "payment":
             stmt = select(PaymentRecord).where(
                 PaymentRecord.tenant_id == self.tenant_id,
@@ -310,6 +415,14 @@ class IndependentSafetyVerifier:
                     f"Evidence '{ev.evidence_id}' currency ({ev.currency}) contradicts payment currency ({pay.currency})"
                 )
                 return False
+            if pay.source_record_id and ev.provenance_hash:
+                prec = self.session.get(ProviderRecord, pay.source_record_id)
+                if prec and ev.provenance_hash != prec.content_hash:
+                    issues.append(
+                        f"Payment evidence '{ev.evidence_id}' provenance hash '{ev.provenance_hash}' "
+                        f"does not match authoritative content hash '{prec.content_hash}'"
+                    )
+                    return False
             return True
 
         elif ev.source_type == "invoice":
@@ -354,6 +467,11 @@ class IndependentSafetyVerifier:
                     f"Evidence '{ev.evidence_id}' amount ({ev.amount_cents}) contradicts refund amount ({ref.amount_minor})"
                 )
                 return False
+            if ev.currency and ev.currency.upper() != ref.currency.upper():
+                issues.append(
+                    f"Evidence '{ev.evidence_id}' currency ({ev.currency}) contradicts refund currency ({ref.currency})"
+                )
+                return False
             return True
 
         elif ev.source_type == "settlement":
@@ -373,6 +491,11 @@ class IndependentSafetyVerifier:
                     f"Evidence '{ev.evidence_id}' amount ({ev.amount_cents}) contradicts settlement amount ({sett.amount_minor})"
                 )
                 return False
+            if ev.currency and ev.currency.upper() != sett.currency.upper():
+                issues.append(
+                    f"Evidence '{ev.evidence_id}' currency ({ev.currency}) contradicts settlement currency ({sett.currency})"
+                )
+                return False
             return True
 
         elif ev.source_type == "provider_record":
@@ -386,6 +509,12 @@ class IndependentSafetyVerifier:
             prec = self.session.scalars(stmt).first()
             if not prec:
                 issues.append(f"Provider record evidence '{ev.evidence_id}' (source_id='{ev.source_id}') does not exist")
+                return False
+            if not ev.provenance_hash or ev.provenance_hash != prec.content_hash:
+                issues.append(
+                    f"Provider record evidence '{ev.evidence_id}' provenance hash '{ev.provenance_hash}' "
+                    f"does not match authoritative content hash '{prec.content_hash}'"
+                )
                 return False
             return True
 
@@ -418,6 +547,86 @@ class IndependentSafetyVerifier:
         issues.append(f"Evidence '{ev.evidence_id}' has unrecognized source_type '{ev.source_type}'")
         return False
 
+    def calculate_authoritative_outstanding_balance(self, invoice_rec: InvoiceRecord) -> int:
+        """Calculate authoritative outstanding ledger balance using D5 accounting rules.
+
+        Includes approved allocations, provider settlements, refunds, and reversals.
+        Raises LedgerReconstructionError on failure; never falls back to total_minor.
+        """
+        domain_inv = invoice_rec.to_domain()
+
+        stmt_alloc = select(AllocationRecord).where(
+            AllocationRecord.tenant_id == self.tenant_id,
+            AllocationRecord.invoice_id == invoice_rec.id,
+        )
+        alloc_recs = self.session.scalars(stmt_alloc).all()
+        domain_allocs: List[PaymentAllocation] = []
+        for a in alloc_recs:
+            pay = self.session.get(PaymentRecord, a.payment_id)
+            pay_id = pay.provider_payment_id if pay else f"PAY-{a.payment_id}"
+            domain_allocs.append(a.to_domain(pay_id, invoice_rec.provider_invoice_id))
+
+        stmt_sett = select(ProviderSettlementRecord).where(
+            ProviderSettlementRecord.tenant_id == self.tenant_id,
+            ProviderSettlementRecord.invoice_id == invoice_rec.id,
+        )
+        sett_recs = self.session.scalars(stmt_sett).all()
+        domain_settlements: List[PaymentAllocation] = [
+            s.to_domain(s.provider_settlement_id, invoice_rec.provider_invoice_id)
+            for s in sett_recs
+        ]
+
+        # Collect payment IDs linked to this invoice via allocations or settlements
+        linked_payment_db_ids = [a.payment_id for a in alloc_recs]
+        for s in sett_recs:
+            if s.payment_id:
+                linked_payment_db_ids.append(s.payment_id)
+
+        conditions = [RefundRecord.invoice_id == invoice_rec.id]
+        if linked_payment_db_ids:
+            conditions.append(
+                and_(
+                    RefundRecord.parent_payment_id.in_(linked_payment_db_ids),
+                    or_(RefundRecord.invoice_id.is_(None), RefundRecord.invoice_id == invoice_rec.id),
+                )
+            )
+
+        stmt_ref = select(RefundRecord).where(
+            RefundRecord.tenant_id == self.tenant_id,
+            or_(*conditions),
+        )
+        ref_recs = self.session.scalars(stmt_ref).all()
+        domain_refunds: List[Refund] = []
+        domain_reversals: List[PaymentReversal] = []
+        for r in ref_recs:
+            parent_pay = self.session.get(PaymentRecord, r.parent_payment_id) if r.parent_payment_id else None
+            pay_id = parent_pay.provider_payment_id if parent_pay else "unknown"
+            if getattr(r, "record_type", "REFUND") == "REVERSAL":
+                domain_reversals.append(r.to_reversal_domain(pay_id, invoice_rec.provider_invoice_id))
+            else:
+                domain_refunds.append(r.to_domain(pay_id, invoice_rec.provider_invoice_id))
+
+        try:
+            return outstanding_cents(
+                domain_inv,
+                domain_allocs + domain_settlements,
+                refunds=domain_refunds,
+                reversals=domain_reversals,
+            )
+        except Exception as exc:
+            raise LedgerReconstructionError(
+                f"Authoritative ledger balance calculation failed for invoice {invoice_rec.invoice_number}: {exc}"
+            ) from exc
+
+    def calculate_payment_remaining_capacity(self, payment_rec: PaymentRecord) -> int:
+        """Calculate remaining unallocated capacity on a payment in minor units."""
+        stmt = select(AllocationRecord).where(
+            AllocationRecord.tenant_id == self.tenant_id,
+            AllocationRecord.payment_id == payment_rec.id,
+        )
+        allocated = sum(a.amount_minor for a in self.session.scalars(stmt).all())
+        return payment_rec.amount_minor - allocated
+
     def _get_invoice(self, invoice_id_or_number: str) -> Optional[InvoiceRecord]:
         stmt = select(InvoiceRecord).where(
             InvoiceRecord.tenant_id == self.tenant_id,
@@ -425,6 +634,16 @@ class IndependentSafetyVerifier:
                 InvoiceRecord.id == invoice_id_or_number,
                 InvoiceRecord.provider_invoice_id == invoice_id_or_number,
                 InvoiceRecord.invoice_number == invoice_id_or_number,
+            ),
+        )
+        return self.session.scalars(stmt).first()
+
+    def _get_payment(self, payment_id_or_provider_id: str) -> Optional[PaymentRecord]:
+        stmt = select(PaymentRecord).where(
+            PaymentRecord.tenant_id == self.tenant_id,
+            or_(
+                PaymentRecord.id == payment_id_or_provider_id,
+                PaymentRecord.provider_payment_id == payment_id_or_provider_id,
             ),
         )
         return self.session.scalars(stmt).first()

@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy import select, or_, and_, desc
 from sqlalchemy.orm import Session
@@ -48,27 +49,69 @@ def sanitize_untrusted_text(text: Optional[str]) -> str:
     """
     if not text:
         return ""
-    # Normalize whitespace, strip control characters
-    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    # Normalize unicode to canonical NFKC to resolve full-width characters and obfuscations
+    normalized = unicodedata.normalize("NFKC", text)
+    # Strip control characters (preserve standard tab, newline)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", normalized)
     return cleaned.strip()
+
+
+def escape_xml_str(text: Optional[str]) -> str:
+    """Escape XML special characters to prevent delimiter breakout attacks.
+
+    Ensures attacker-controlled text cannot close </untrusted_financial_data> or inject XML elements.
+    """
+    if not text:
+        return ""
+    cleaned = sanitize_untrusted_text(text)
+    return (
+        cleaned.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def sanitize_untrusted_structure(obj: Any) -> Any:
+    """Recursively sanitize and XML-escape strings in nested structures."""
+    if isinstance(obj, str):
+        return escape_xml_str(obj)
+    elif isinstance(obj, dict):
+        return {k: sanitize_untrusted_structure(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_untrusted_structure(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(sanitize_untrusted_structure(item) for item in obj)
+    return obj
 
 
 def check_for_prompt_injection(text: Optional[str]) -> bool:
     """Detect common prompt-injection / instruction-override patterns in customer text."""
     if not text:
         return False
+    # Normalize unicode before inspection
+    norm_text = unicodedata.normalize("NFKC", text)
     suspicious_patterns = [
-        r"ignore\s+(?:all\s+)?previous",
+        r"</?untrusted",
+        r"<\s*system",
+        r"\[inst\]",
+        r"<\|im_start\|>",
+        r"<\|im_end\|>",
+        r"developer\s*:\s*",
+        r"admin\s*:\s*",
         r"system\s*:\s*",
         r"system\s+override",
         r"human\s*:\s*",
         r"assistant\s*:\s*",
+        r"ignore\s+(?:all\s+)?(?:previous|prior)",
         r"override\s+(?:all\s+)?rules",
         r"approve\s+(?:this\s+)?(?:payment|transaction|allocation)",
         r"disregard\s+(?:all\s+)?(?:guidelines|rules|financial)",
-        r"bypass\s+(?:human|verification|checks)",
+        r"bypass\s+(?:human|verification|checks|approval)",
+        r"requires_human_review\s*:\s*false",
     ]
-    return any(re.search(pat, text, re.IGNORECASE) for pat in suspicious_patterns)
+    return any(re.search(pat, norm_text, re.IGNORECASE) for pat in suspicious_patterns)
 
 
 
@@ -209,9 +252,23 @@ class EvidenceToolKit:
         sett_recs = self.session.scalars(stmt_sett).all()
 
         # Load refunds and reversals
+        linked_payment_db_ids = [a.payment_id for a in alloc_recs]
+        for s in sett_recs:
+            if s.payment_id:
+                linked_payment_db_ids.append(s.payment_id)
+
+        conditions = [RefundRecord.invoice_id == inv.id]
+        if linked_payment_db_ids:
+            conditions.append(
+                and_(
+                    RefundRecord.parent_payment_id.in_(linked_payment_db_ids),
+                    or_(RefundRecord.invoice_id.is_(None), RefundRecord.invoice_id == inv.id),
+                )
+            )
+
         stmt_ref = select(RefundRecord).where(
             RefundRecord.tenant_id == self.tenant_id,
-            RefundRecord.invoice_id == inv.id,
+            or_(*conditions),
         )
         ref_recs = self.session.scalars(stmt_ref).all()
         domain_refunds: List[Refund] = []
@@ -229,6 +286,7 @@ class EvidenceToolKit:
             domain_settlements.append(s.to_domain(s.provider_settlement_id, inv.provider_invoice_id))
 
         # Calculate exact ledger balance accounting for allocations and external settlements
+        ledger_error: Optional[str] = None
         try:
             calculated_balance = outstanding_cents(
                 domain_inv,
@@ -236,18 +294,27 @@ class EvidenceToolKit:
                 refunds=domain_refunds,
                 reversals=domain_reversals,
             )
-        except Exception:
-            calculated_balance = domain_inv.outstanding_balance_cents
+        except Exception as exc:
+            calculated_balance = None
+            ledger_error = str(exc)
 
         clean_memo = sanitize_untrusted_text(inv.memo)
         has_prompt_injection = check_for_prompt_injection(inv.memo)
+
+        desc = (
+            f"Invoice {inv.invoice_number} ({inv.provider_invoice_id}) for total {inv.total_minor} {inv.currency}, "
+            f"outstanding {calculated_balance} {inv.currency}"
+            if calculated_balance is not None
+            else f"Invoice {inv.invoice_number} ({inv.provider_invoice_id}) for total {inv.total_minor} {inv.currency}, "
+                 f"outstanding balance uncalculated (ledger error: {ledger_error})"
+        )
 
         evidence_ref = EvidenceReference(
             evidence_id=f"ev_inv_{inv.provider_invoice_id}",
             source_type="invoice",
             source_id=inv.provider_invoice_id,
             tenant_id=self.tenant_id,
-            description=f"Invoice {inv.invoice_number} ({inv.provider_invoice_id}) for total {inv.total_minor} {inv.currency}, outstanding {calculated_balance} {inv.currency}",
+            description=desc,
             amount_cents=inv.total_minor,
             currency=inv.currency,
             metadata={
@@ -259,6 +326,7 @@ class EvidenceToolKit:
                 "issued_on": inv.issued_on.isoformat(),
                 "due_on": inv.due_on.isoformat(),
                 "calculated_outstanding_cents": calculated_balance,
+                "ledger_calculation_error": ledger_error,
                 "provider_due_cents": inv.provider_due_minor,
                 "memo_untrusted": clean_memo,
                 "suspected_prompt_injection": has_prompt_injection,
@@ -273,6 +341,7 @@ class EvidenceToolKit:
             "customer_email": inv.customer_email,
             "total_amount_cents": inv.total_minor,
             "calculated_outstanding_cents": calculated_balance,
+            "ledger_calculation_error": ledger_error,
             "provider_reported_due_cents": inv.provider_due_minor,
             "currency": inv.currency,
             "status": inv.status,
