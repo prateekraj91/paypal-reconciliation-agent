@@ -191,3 +191,42 @@ def test_independent_accounting_of_settlements_and_allocations_with_refunds():
     invoice_contradicting = inv(1, 200000, due_amount_cents=0)  # PayPal claims 0 due, but ledger says 30,000
     with pytest.raises(AccountingError, match="Accounting inconsistency for invoice"):
         cross_check_invoice_balance(invoice_contradicting, [settlement_alloc, app_alloc], refunds=[refund_app])
+
+
+def test_refund_for_unrelated_payment_does_not_restore_capacity():
+    """Verify refund referencing an unrelated payment never restores invoice capacity."""
+    invoice = inv(1, 100000)  # $1,000
+    alloc = make_alloc("pay_legit_1", invoice.invoice_id, 100000)
+
+    # Fully paid ($0 outstanding)
+    assert outstanding_cents(invoice, [alloc]) == 0
+
+    # Refund arrives for an unrelated payment "pay_unrelated_999"
+    unrelated_refund = make_refund(
+        "ref_unrelated_1", "pay_unrelated_999", 50000, invoice_id=invoice.invoice_id
+    )
+
+    # Balance remains 0; unrelated refund does NOT restore capacity
+    assert outstanding_cents(invoice, [alloc], refunds=[unrelated_refund]) == 0
+
+
+def test_refund_with_non_completed_status_does_not_restore_capacity():
+    """Verify pending or failed refunds do not restore invoice capacity."""
+    invoice = inv(1, 100000)  # $1,000
+    alloc = make_alloc("pay_1", invoice.invoice_id, 100000)
+
+    assert outstanding_cents(invoice, [alloc]) == 0
+
+    pending_refund = Refund(
+        refund_id="ref_pending_1",
+        parent_payment_id="pay_1",
+        amount_cents=50000,
+        currency="USD",
+        refunded_at=datetime.now(timezone.utc),
+        status="PENDING",
+        invoice_id=invoice.invoice_id,
+    )
+
+    # Pending refund must not alter balance
+    assert outstanding_cents(invoice, [alloc], refunds=[pending_refund]) == 0
+
