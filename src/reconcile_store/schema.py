@@ -50,7 +50,9 @@ from reconcile.models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     PaymentStatus,
+    Refund,
 )
 
 
@@ -332,6 +334,8 @@ class ProposalRecord(Base):
     evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     source_hashes_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     verifier_status: Mapped[str] = mapped_column(String(32), nullable=False, default="NOT_VERIFIED")
+    excess_amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    ambiguity_certificate_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -598,3 +602,124 @@ class WebhookInboxRecord(Base):
             return json.loads(self.headers_json)
         except Exception:
             return {}
+
+
+# --------------------------------------------------------------------------
+# 15. Refunds (External Refunds & Payment Reversals)
+# --------------------------------------------------------------------------
+
+
+class RefundRecord(Base):
+    __tablename__ = "refunds"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _gen_id("ref"))
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="paypal")
+    provider_refund_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_payment_id: Mapped[str] = mapped_column(String(64), ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True)
+    invoice_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="COMPLETED")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    record_type: Mapped[str] = mapped_column(String(32), nullable=False, default="REFUND")
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    settlement_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("provider_settlements.id", ondelete="SET NULL"), nullable=True)
+    allocation_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("allocations.id", ondelete="SET NULL"), nullable=True)
+    dispute_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    source_record_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("provider_records.id", ondelete="SET NULL"), nullable=True)
+    refunded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "provider_refund_id", name="uq_refund_tenant_provider_id"),
+        Index("ix_refund_tenant_parent_payment", "tenant_id", "parent_payment_id"),
+    )
+
+    def to_domain(self, provider_payment_id: str, provider_invoice_id: Optional[str] = None) -> Refund:
+        return Refund(
+            refund_id=self.provider_refund_id,
+            parent_payment_id=provider_payment_id,
+            amount_cents=self.amount_minor,
+            currency=self.currency,
+            refunded_at=self.refunded_at,
+            status=self.status,
+            reason=self.reason,
+            invoice_id=provider_invoice_id,
+            target_type=self.target_type,
+            settlement_id=self.settlement_id,
+            allocation_id=self.allocation_id,
+        )
+
+    def to_reversal_domain(self, provider_payment_id: str, provider_invoice_id: Optional[str] = None) -> PaymentReversal:
+        return PaymentReversal(
+            reversal_id=self.provider_refund_id,
+            parent_payment_id=provider_payment_id,
+            amount_cents=self.amount_minor,
+            currency=self.currency,
+            reversed_at=self.refunded_at,
+            status=self.status,
+            reason=self.reason,
+            dispute_id=self.dispute_id,
+            invoice_id=provider_invoice_id,
+            target_type=self.target_type,
+            settlement_id=self.settlement_id,
+            allocation_id=self.allocation_id,
+        )
+
+    @classmethod
+    def from_domain(
+        cls,
+        refund: Refund,
+        tenant_id: str,
+        db_parent_payment_id: str,
+        db_invoice_id: Optional[str] = None,
+        provider: str = "paypal",
+        source_record_id: Optional[str] = None,
+    ) -> "RefundRecord":
+        return cls(
+            tenant_id=tenant_id,
+            provider=provider,
+            provider_refund_id=refund.refund_id,
+            parent_payment_id=db_parent_payment_id,
+            invoice_id=db_invoice_id,
+            amount_minor=refund.amount_cents,
+            currency=refund.currency.strip().upper(),
+            status=refund.status,
+            reason=refund.reason,
+            record_type="REFUND",
+            target_type=refund.target_type,
+            settlement_id=refund.settlement_id,
+            allocation_id=refund.allocation_id,
+            source_record_id=source_record_id,
+            refunded_at=refund.refunded_at,
+        )
+
+    @classmethod
+    def from_reversal_domain(
+        cls,
+        reversal: PaymentReversal,
+        tenant_id: str,
+        db_parent_payment_id: str,
+        db_invoice_id: Optional[str] = None,
+        provider: str = "paypal",
+        source_record_id: Optional[str] = None,
+    ) -> "RefundRecord":
+        return cls(
+            tenant_id=tenant_id,
+            provider=provider,
+            provider_refund_id=reversal.reversal_id,
+            parent_payment_id=db_parent_payment_id,
+            invoice_id=db_invoice_id,
+            amount_minor=reversal.amount_cents,
+            currency=reversal.currency.strip().upper(),
+            status=reversal.status,
+            reason=reversal.reason,
+            record_type="REVERSAL",
+            target_type=reversal.target_type,
+            settlement_id=reversal.settlement_id,
+            allocation_id=reversal.allocation_id,
+            dispute_id=reversal.dispute_id,
+            source_record_id=source_record_id,
+            refunded_at=reversal.reversed_at,
+        )

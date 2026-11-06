@@ -25,6 +25,7 @@ from .schema import (
     VerificationRecord,
     AllocationRecord,
     ProviderSettlementRecord,
+    RefundRecord,
 )
 from .repositories import (
     TenantRepository,
@@ -36,6 +37,7 @@ from .repositories import (
     VerificationRepository,
     AllocationRepository,
     ProviderSettlementRepository,
+    RefundRepository,
     AuditRepository,
 )
 from .approval import ApprovalService, ApprovalResult
@@ -47,9 +49,11 @@ from reconcile.models import (
     Invoice,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     AllocationStatus,
     MatchOutcome,
     MatchProposal,
+    Refund,
 )
 from reconcile.workflow import reconcile_payments, ReconciliationRunResult
 
@@ -77,6 +81,7 @@ class StorageWorkflow:
         self.verification_repo = VerificationRepository(session)
         self.allocation_repo = AllocationRepository(session)
         self.settlement_repo = ProviderSettlementRepository(session)
+        self.refund_repo = RefundRepository(session)
         self.audit_repo = AuditRepository(session)
         self.approval_service = ApprovalService(session)
 
@@ -263,6 +268,158 @@ class StorageWorkflow:
             environment=environment,
         )
 
+    def ingest_refunds(
+        self,
+        tenant_id: str,
+        refunds: Sequence[Refund],
+        raw_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+        provider: str = "paypal",
+    ) -> List[RefundRecord]:
+        """Ingest external refunds or payment reversals into dedicated refunds table."""
+        results: List[RefundRecord] = []
+        for ref in refunds:
+            source_rec_id: Optional[str] = None
+            if raw_payloads and ref.refund_id in raw_payloads:
+                raw_rec = self.provider_record_repo.store_record(
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    record_kind="refund",
+                    provider_record_id=ref.refund_id,
+                    raw_payload=raw_payloads[ref.refund_id],
+                )
+                source_rec_id = raw_rec.id
+
+            parent_pay = self.payment_repo.get_by_provider_id(tenant_id, provider, ref.parent_payment_id)
+            if parent_pay is None:
+                parent_pay = self.payment_repo.upsert_payment(
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    provider_payment_id=ref.parent_payment_id,
+                    amount_minor=ref.amount_cents,
+                    currency=ref.currency,
+                    status="COMPLETED",
+                    payer_name="Refunded Payment Placeholder",
+                )
+
+            inv_rec = None
+            if ref.invoice_id:
+                inv_rec = self.invoice_repo.get_by_provider_id(tenant_id, provider, ref.invoice_id)
+
+            refund_rec = self.refund_repo.upsert_refund(
+                tenant_id=tenant_id,
+                provider=provider,
+                provider_refund_id=ref.refund_id,
+                parent_payment_id=parent_pay.id,
+                amount_minor=ref.amount_cents,
+                currency=ref.currency,
+                invoice_id=inv_rec.id if inv_rec else None,
+                status=ref.status,
+                reason=ref.reason,
+                target_type=ref.target_type,
+                settlement_id=ref.settlement_id,
+                allocation_id=ref.allocation_id,
+                refunded_at=ref.refunded_at,
+                source_record_id=source_rec_id,
+            )
+            results.append(refund_rec)
+
+            self.audit_repo.append_event(
+                tenant_id=tenant_id,
+                event_type="REFUND_RECORDED",
+                actor=f"{provider}:refund",
+                subject_type="refund",
+                subject_id=refund_rec.id,
+                details={
+                    "provider": provider,
+                    "provider_refund_id": refund_rec.provider_refund_id,
+                    "parent_payment_id": parent_pay.id,
+                    "provider_payment_id": ref.parent_payment_id,
+                    "amount_minor": ref.amount_cents,
+                    "currency": ref.currency,
+                    "invoice_id": inv_rec.id if inv_rec else None,
+                },
+            )
+
+        self.session.commit()
+        return results
+
+    def ingest_reversals(
+        self,
+        tenant_id: str,
+        reversals: Sequence[PaymentReversal],
+        raw_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+        provider: str = "paypal",
+    ) -> List[RefundRecord]:
+        """Ingest involuntary payment reversals (e.g. chargebacks, clawbacks) into dedicated refunds table."""
+        results: List[RefundRecord] = []
+        for rev in reversals:
+            source_rec_id: Optional[str] = None
+            if raw_payloads and rev.reversal_id in raw_payloads:
+                raw_rec = self.provider_record_repo.store_record(
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    record_kind="reversal",
+                    provider_record_id=rev.reversal_id,
+                    raw_payload=raw_payloads[rev.reversal_id],
+                )
+                source_rec_id = raw_rec.id
+
+            parent_pay = self.payment_repo.get_by_provider_id(tenant_id, provider, rev.parent_payment_id)
+            if parent_pay is None:
+                parent_pay = self.payment_repo.upsert_payment(
+                    tenant_id=tenant_id,
+                    provider=provider,
+                    provider_payment_id=rev.parent_payment_id,
+                    amount_minor=rev.amount_cents,
+                    currency=rev.currency,
+                    status="COMPLETED",
+                    payer_name="Reversed Payment Placeholder",
+                )
+
+            inv_rec = None
+            if rev.invoice_id:
+                inv_rec = self.invoice_repo.get_by_provider_id(tenant_id, provider, rev.invoice_id)
+
+            reversal_rec = self.refund_repo.upsert_reversal(
+                tenant_id=tenant_id,
+                provider=provider,
+                provider_reversal_id=rev.reversal_id,
+                parent_payment_id=parent_pay.id,
+                amount_minor=rev.amount_cents,
+                currency=rev.currency,
+                invoice_id=inv_rec.id if inv_rec else None,
+                status=rev.status,
+                reason=rev.reason,
+                dispute_id=rev.dispute_id,
+                target_type=rev.target_type,
+                settlement_id=rev.settlement_id,
+                allocation_id=rev.allocation_id,
+                reversed_at=rev.reversed_at,
+                source_record_id=source_rec_id,
+            )
+            results.append(reversal_rec)
+
+            self.audit_repo.append_event(
+                tenant_id=tenant_id,
+                event_type="PAYMENT_REVERSAL_RECORDED",
+                actor=f"{provider}:reversal",
+                subject_type="reversal",
+                subject_id=reversal_rec.id,
+                details={
+                    "provider": provider,
+                    "provider_reversal_id": reversal_rec.provider_refund_id,
+                    "parent_payment_id": parent_pay.id,
+                    "provider_payment_id": rev.parent_payment_id,
+                    "amount_minor": rev.amount_cents,
+                    "currency": rev.currency,
+                    "invoice_id": inv_rec.id if inv_rec else None,
+                    "dispute_id": rev.dispute_id,
+                },
+            )
+
+        self.session.commit()
+        return results
+
     def run_reconciliation(
         self,
         tenant_id: str,
@@ -304,6 +461,7 @@ class StorageWorkflow:
         # Load existing approved ledger allocations and provider settlements separately
         db_allocs = list(self.allocation_repo.get_all_allocations(tenant_id))
         db_settlements = list(self.settlement_repo.get_all_settlements(tenant_id))
+        db_refunds = list(self.refund_repo.list_all_refunds(tenant_id))
 
         domain_approved_allocs: List[PaymentAllocation] = []
         for a in db_allocs:
@@ -321,6 +479,21 @@ class StorageWorkflow:
             if inv_id:
                 domain_settlements.append(s.to_domain(pay_id, inv_id))
 
+        domain_refunds: List[Refund] = []
+        domain_reversals: List[PaymentReversal] = []
+        for r in db_refunds:
+            pay = self.payment_repo.get_payment(tenant_id, r.parent_payment_id)
+            inv = self.invoice_repo.get_invoice(tenant_id, r.invoice_id) if r.invoice_id else None
+            if pay:
+                if getattr(r, "record_type", "REFUND") == "REVERSAL":
+                    domain_reversals.append(
+                        r.to_reversal_domain(pay.provider_payment_id, inv.provider_invoice_id if inv else None)
+                    )
+                else:
+                    domain_refunds.append(
+                        r.to_domain(pay.provider_payment_id, inv.provider_invoice_id if inv else None)
+                    )
+
         # Convert to pure domain models
         domain_invoices = [inv.to_domain() for inv in db_invoices]
         domain_payments = [pay.to_domain() for pay in db_payments]
@@ -331,6 +504,8 @@ class StorageWorkflow:
             "payments": [p.payment_id for p in domain_payments],
             "existing_allocations": [(a.payment_id, a.invoice_id, a.amount_cents) for a in domain_approved_allocs],
             "provider_settlements": [(s.payment_id, s.invoice_id, s.amount_cents) for s in domain_settlements],
+            "refunds": [(r.refund_id, r.parent_payment_id, r.amount_cents) for r in domain_refunds],
+            "reversals": [(rev.reversal_id, rev.parent_payment_id, rev.amount_cents) for rev in domain_reversals],
         })
         snapshot_hash = hashlib.sha256(snapshot_content.encode("utf-8")).hexdigest()
 
@@ -348,6 +523,8 @@ class StorageWorkflow:
             matcher=active_matcher,
             existing_allocations=domain_approved_allocs,
             provider_settlements=domain_settlements,
+            refunds=domain_refunds,
+            reversals=domain_reversals,
         )
 
         # Build ID lookup maps
@@ -415,6 +592,8 @@ class StorageWorkflow:
                 source_hashes={"snapshot_hash": snapshot_hash},
                 verifier_status=ver_status,
                 allocations=alloc_payloads,
+                excess_amount_minor=getattr(prop, "excess_amount_cents", 0),
+                ambiguity_certificate=prop.ambiguity_certificate.to_dict() if prop.ambiguity_certificate else None,
             )
 
             # Persist verification record
