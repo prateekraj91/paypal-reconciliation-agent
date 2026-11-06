@@ -42,6 +42,7 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     PaymentStatus,
     Refund,
 )
@@ -67,8 +68,15 @@ class BaselineMatcher:
         approved: Sequence[PaymentAllocation] = (),
         settlements: Sequence[PaymentAllocation] = (),
         refunds: Sequence[Refund] = (),
+        reversals: Sequence[PaymentReversal] = (),
     ) -> list[MatchProposal]:
-        run = MatchRun(invoices, approved, settlements=settlements, refunds=refunds)
+        run = MatchRun(
+            invoices,
+            approved,
+            settlements=settlements,
+            refunds=refunds,
+            reversals=reversals,
+        )
         ordered = sorted(payments, key=lambda p: (p.received_at, p.payment_id))
         return [self._match_one(p, run) for p in ordered]
 

@@ -19,7 +19,9 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     PaymentStatus,
+    Refund,
     cross_check_invoice_balance,
     outstanding_cents,
 )
@@ -40,6 +42,8 @@ def verify_proposals(
     payments: Sequence[Payment],
     invoices: Sequence[Invoice],
     existing_allocations: Sequence[PaymentAllocation] = (),
+    refunds: Sequence[Refund] = (),
+    reversals: Sequence[PaymentReversal] = (),
 ) -> list[VerificationResult]:
     """Verify proposed allocations against payment and invoice records.
 
@@ -220,7 +224,7 @@ def verify_proposals(
             if invoice.invoice_id not in verified_invoice_balances:
                 try:
                     verified_invoice_balances[invoice.invoice_id] = cross_check_invoice_balance(
-                        invoice, approved_allocations
+                        invoice, approved_allocations, refunds=refunds, reversals=reversals
                     )
                 except ValueError as exc:
                     issues.append(str(exc))
@@ -258,7 +262,7 @@ def verify_proposals(
         invoice = invoice_matches[0]
         available = verified_invoice_balances.get(
             invoice_id,
-            outstanding_cents(invoice, approved_allocations),
+            outstanding_cents(invoice, approved_allocations, refunds=refunds, reversals=reversals),
         )
         total_proposed = sum(amount for _index, amount in usages)
 

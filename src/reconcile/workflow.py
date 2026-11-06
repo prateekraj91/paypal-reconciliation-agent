@@ -14,6 +14,7 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     Refund,
     deduplicate_allocations,
 )
@@ -79,6 +80,7 @@ def reconcile_payments(
     existing_allocations: Optional[Sequence[PaymentAllocation]] = None,
     provider_settlements: Optional[Sequence[PaymentAllocation]] = None,
     refunds: Optional[Sequence[Refund]] = None,
+    reversals: Optional[Sequence[PaymentReversal]] = None,
 ) -> ReconciliationRunResult:
     """Execute end-to-end reconciliation for a batch of payments against an invoice source.
 
@@ -96,8 +98,8 @@ def reconcile_payments(
        Defaults to DeterministicMatcher() if no matcher is supplied.
 
     4. Independent Verification:
-       Validates proposed allocations against payments, invoices, and approved allocations
-       using `verify_proposals()`.
+       Validates proposed allocations against payments, invoices, approved allocations,
+       provider settlements, refunds, and reversals using `verify_proposals()`.
 
     Returns a ReconciliationRunResult containing invoices, ledger allocations,
     proposals, and verification results.
@@ -106,7 +108,9 @@ def reconcile_payments(
     ingested_invoices: Sequence[Invoice]
     ingested_allocs: Sequence[PaymentAllocation] = ()
 
-    if hasattr(invoice_source, "list_invoices_with_allocations") and callable(
+    if isinstance(invoice_source, (list, tuple)):
+        ingested_invoices = invoice_source
+    elif hasattr(invoice_source, "list_invoices_with_allocations") and callable(
         invoice_source.list_invoices_with_allocations
     ):
         ingested_invoices, ingested_allocs = (
@@ -139,6 +143,8 @@ def reconcile_payments(
         match_kwargs["settlements"] = settled_allocs
     if "refunds" in matcher_sig.parameters and refunds is not None:
         match_kwargs["refunds"] = refunds
+    if "reversals" in matcher_sig.parameters and reversals is not None:
+        match_kwargs["reversals"] = reversals
     proposals = active_matcher.match(payments, ingested_invoices, **match_kwargs)
 
     # 4. Independent verification
@@ -147,7 +153,9 @@ def reconcile_payments(
         proposed_only,
         payments,
         ingested_invoices,
-        existing_allocations=combined_allocs,
+        existing_allocations=combined_allocs + list(settled_allocs),
+        refunds=refunds or (),
+        reversals=reversals or (),
     )
 
     return ReconciliationRunResult(

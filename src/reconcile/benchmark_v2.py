@@ -30,6 +30,7 @@ from .models import (
     MatchProposal,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
     PaymentStatus,
     Refund,
     outstanding_cents,
@@ -70,17 +71,21 @@ class BenchmarkV2Dataset:
     invoices: tuple[Invoice, ...]
     payments: tuple[Payment, ...]
     refunds: tuple[Refund, ...] = ()
+    reversals: tuple[PaymentReversal, ...] = ()
     approved_allocations: tuple[PaymentAllocation, ...] = ()
     provider_settlements: tuple[PaymentAllocation, ...] = ()
     truth: Mapping[str, GroundTruthV2] = field(default_factory=dict)
 
 
-def generate_benchmark_v2(seed: int, split: str = "train") -> BenchmarkV2Dataset:
+def generate_benchmark_v2(
+    seed: int, split: str = "train", cases_per_group: int = 8
+) -> BenchmarkV2Dataset:
     """Generate a reproducible, deterministic Benchmark v2 dataset with all 14 scenario groups."""
     rng = random.Random(seed + (1000 if split == "holdout" else 0))
 
     base_date = date(2026, 11, 1)
     base_time = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    prefix = "TRN" if split == "train" else "HLD"
 
     invoices: list[Invoice] = []
     payments: list[Payment] = []
@@ -103,15 +108,15 @@ def generate_benchmark_v2(seed: int, split: str = "train") -> BenchmarkV2Dataset
         nonlocal inv_counter
         idx = inv_counter
         inv_counter += 1
-        num = f"INV-V2-{idx:04d}"
-        inv_id = f"inv_v2_{idx:04d}"
+        num = f"INV-V2-{prefix}-{idx:04d}"
+        inv_id = f"inv_v2_{prefix.lower()}_{idx:04d}"
         iss = base_date + timedelta(days=days_offset)
         due = iss + timedelta(days=14)
         return Invoice(
             invoice_id=inv_id,
             number=num,
             customer_name=customer_name,
-            customer_email=customer_email or f"user{idx}@example.com",
+            customer_email=customer_email or f"user_{prefix.lower()}_{idx}@example.com",
             amount_cents=amount_cents,
             currency=currency,
             issued_on=iss,
@@ -132,243 +137,285 @@ def generate_benchmark_v2(seed: int, split: str = "train") -> BenchmarkV2Dataset
         nonlocal pay_counter
         idx = pay_counter
         pay_counter += 1
-        pid = f"pay_v2_{idx:04d}"
+        pid = f"pay_v2_{prefix.lower()}_{idx:04d}"
         p_time = base_time + timedelta(days=days_offset, minutes=idx)
         return Payment(
             payment_id=pid,
             amount_cents=amount_cents,
             currency=currency,
             received_at=p_time,
-            payer_name=payer_name or f"Payer {idx}",
-            payer_email=payer_email or f"payer{idx}@example.com",
+            payer_name=payer_name or f"Payer {prefix} {idx}",
+            payer_email=payer_email or f"payer_{prefix.lower()}_{idx}@example.com",
             reference=reference,
             note=note,
             status=status,
         )
 
     # 1. EXACT_SINGLE: Exact reference match (T1)
-    inv1 = next_inv(45000, "Apex Corp")
-    invoices.append(inv1)
-    p1 = next_pay(45000, reference=inv1.number, payer_name="Apex Corp")
-    payments.append(p1)
-    truth[p1.payment_id] = GroundTruthV2(
-        payment_id=p1.payment_id,
-        scenario_group=ScenarioGroup.EXACT_SINGLE,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv1.invoice_id, 45000),),
-    )
+    for k in range(cases_per_group):
+        amt = 30000 + k * 12500
+        inv = next_inv(amt, f"Apex Corp {prefix} {k+1}")
+        invoices.append(inv)
+        p = next_pay(amt, reference=inv.number, payer_name=inv.customer_name)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.EXACT_SINGLE,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, amt),),
+        )
 
     # 2. CONTEXTUAL_MATCH: Strong multi-signal contextual match (customer name + email + temporal) (T4)
-    inv2 = next_inv(62000, "BioGen Technologies", "accounting@biogen.com", days_offset=1)
-    invoices.append(inv2)
-    p2 = next_pay(
-        62000,
-        reference="",
-        payer_name="BioGen Technologies",
-        payer_email="accounting@biogen.com",
-        note="Vendor payment for supplies",
-        days_offset=3,
-    )
-    payments.append(p2)
-    truth[p2.payment_id] = GroundTruthV2(
-        payment_id=p2.payment_id,
-        scenario_group=ScenarioGroup.CONTEXTUAL_MATCH,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv2.invoice_id, 62000),),
-    )
+    for k in range(cases_per_group):
+        amt = 40000 + k * 8500
+        cust_name = f"BioGen Tech {prefix} {k+1}"
+        cust_email = f"accounting_{prefix.lower()}_{k+1}@biogen.com"
+        inv = next_inv(amt, cust_name, cust_email, days_offset=k)
+        invoices.append(inv)
+        p = next_pay(
+            amt,
+            reference="",
+            payer_name=cust_name,
+            payer_email=cust_email,
+            note=f"Vendor supplies payment batch {k+1}",
+            days_offset=k + 2,
+        )
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.CONTEXTUAL_MATCH,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, amt),),
+        )
 
     # 3. PARTIAL_PAYMENT: Partial payment with valid reference (T5)
-    inv3 = next_inv(100000, "Catalyst Labs")
-    invoices.append(inv3)
-    p3 = next_pay(35000, reference=inv3.number, payer_name="Catalyst Labs")
-    payments.append(p3)
-    truth[p3.payment_id] = GroundTruthV2(
-        payment_id=p3.payment_id,
-        scenario_group=ScenarioGroup.PARTIAL_PAYMENT,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv3.invoice_id, 35000),),
-    )
+    for k in range(cases_per_group):
+        inv_amt = 80000 + k * 15000
+        pay_amt = 30000 + k * 5000
+        inv = next_inv(inv_amt, f"Catalyst Labs {prefix} {k+1}")
+        invoices.append(inv)
+        p = next_pay(pay_amt, reference=inv.number, payer_name=inv.customer_name)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.PARTIAL_PAYMENT,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, pay_amt),),
+        )
 
     # 4. SEQUENTIAL_PARTIAL: Subsequent payment against an already partially paid invoice (T5)
-    inv4 = next_inv(80000, "Delta Dynamics")
-    invoices.append(inv4)
-    alloc_prior = PaymentAllocation(
-        payment_id="pay_prior_1",
-        invoice_id=inv4.invoice_id,
-        amount_cents=30000,
-        status=AllocationStatus.APPROVED,
-        currency="USD",
-    )
-    approved.append(alloc_prior)
-    # Remaining capacity is 50,000 cents
-    p4 = next_pay(50000, reference=inv4.number, payer_name="Delta Dynamics")
-    payments.append(p4)
-    truth[p4.payment_id] = GroundTruthV2(
-        payment_id=p4.payment_id,
-        scenario_group=ScenarioGroup.SEQUENTIAL_PARTIAL,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv4.invoice_id, 50000),),
-    )
+    for k in range(cases_per_group):
+        inv_amt = 90000 + k * 10000
+        prior_amt = 40000 + k * 3000
+        rem_amt = inv_amt - prior_amt
+        inv = next_inv(inv_amt, f"Delta Dynamics {prefix} {k+1}")
+        invoices.append(inv)
+        alloc_prior = PaymentAllocation(
+            payment_id=f"pay_prior_{prefix.lower()}_{k+1}",
+            invoice_id=inv.invoice_id,
+            amount_cents=prior_amt,
+            status=AllocationStatus.APPROVED,
+            currency="USD",
+        )
+        approved.append(alloc_prior)
+        p = next_pay(rem_amt, reference=inv.number, payer_name=inv.customer_name)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.SEQUENTIAL_PARTIAL,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, rem_amt),),
+        )
 
     # 5. SPLIT_INSTALLMENTS: First installment of split payments
-    inv5 = next_inv(90000, "Echo Enterprises")
-    invoices.append(inv5)
-    p5 = next_pay(45000, reference=inv5.number, payer_name="Echo Enterprises", note="Installment 1 of 2")
-    payments.append(p5)
-    truth[p5.payment_id] = GroundTruthV2(
-        payment_id=p5.payment_id,
-        scenario_group=ScenarioGroup.SPLIT_INSTALLMENTS,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv5.invoice_id, 45000),),
-    )
+    for k in range(cases_per_group):
+        inv_amt = 60000 + k * 20000
+        inst_amt = inv_amt // 2
+        inv = next_inv(inv_amt, f"Echo Enterprises {prefix} {k+1}")
+        invoices.append(inv)
+        p = next_pay(inst_amt, reference=inv.number, payer_name=inv.customer_name, note="Installment 1 of 2")
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.SPLIT_INSTALLMENTS,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, inst_amt),),
+        )
 
     # 6. GROUPED_PAYMENT: Single payment referencing two open invoices (T3/T5)
-    inv6a = next_inv(25000, "Falcon Freight")
-    inv6b = next_inv(35000, "Falcon Freight")
-    invoices.extend([inv6a, inv6b])
-    p6 = next_pay(60000, reference=f"{inv6a.number}, {inv6b.number}", payer_name="Falcon Freight")
-    payments.append(p6)
-    truth[p6.payment_id] = GroundTruthV2(
-        payment_id=p6.payment_id,
-        scenario_group=ScenarioGroup.GROUPED_PAYMENT,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv6a.invoice_id, 25000), (inv6b.invoice_id, 35000)),
-    )
+    for k in range(cases_per_group):
+        amt_a = 20000 + k * 4000
+        amt_b = 30000 + k * 5000
+        inv_a = next_inv(amt_a, f"Falcon Freight {prefix} {k+1}")
+        inv_b = next_inv(amt_b, f"Falcon Freight {prefix} {k+1}")
+        invoices.extend([inv_a, inv_b])
+        p = next_pay(amt_a + amt_b, reference=f"{inv_a.number}, {inv_b.number}", payer_name=inv_a.customer_name)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.GROUPED_PAYMENT,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv_a.invoice_id, amt_a), (inv_b.invoice_id, amt_b)),
+        )
 
     # 7. OVERPAYMENT: Payment exceeding invoice capacity, allocates max and reports excess (T5)
-    inv7 = next_inv(50000, "Gamma Global")
-    invoices.append(inv7)
-    p7 = next_pay(65000, reference=inv7.number, payer_name="Gamma Global")
-    payments.append(p7)
-    truth[p7.payment_id] = GroundTruthV2(
-        payment_id=p7.payment_id,
-        scenario_group=ScenarioGroup.OVERPAYMENT,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv7.invoice_id, 50000),),
-        expected_excess_cents=15000,
-    )
+    for k in range(cases_per_group):
+        inv_amt = 50000 + k * 10000
+        excess_amt = 15000 + k * 2500
+        inv = next_inv(inv_amt, f"Gamma Global {prefix} {k+1}")
+        invoices.append(inv)
+        p = next_pay(inv_amt + excess_amt, reference=inv.number, payer_name=inv.customer_name)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.OVERPAYMENT,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, inv_amt),),
+            expected_excess_cents=excess_amt,
+        )
 
-    # 8. DUPLICATE_DELIVERY: Replayed webhook event
-    p8_orig = next_pay(33000, reference="INV-V2-0001", payer_name="Duplicate Payer")
-    p8_dupe = Payment(
-        payment_id=p8_orig.payment_id,
-        amount_cents=p8_orig.amount_cents,
-        currency=p8_orig.currency,
-        received_at=p8_orig.received_at + timedelta(minutes=5),
-        payer_name=p8_orig.payer_name,
-        reference=p8_orig.reference,
-        status=PaymentStatus.COMPLETED,
-    )
-    payments.extend([p8_orig, p8_dupe])
-    truth[p8_dupe.payment_id] = GroundTruthV2(
-        payment_id=p8_dupe.payment_id,
-        scenario_group=ScenarioGroup.DUPLICATE_DELIVERY,
-        expected_outcome=MatchOutcome.NO_MATCH,
-    )
+    # 8. DUPLICATE_DELIVERY: Payment already approved in ledger re-delivered as webhook
+    for k in range(cases_per_group):
+        amt = 33000 + k * 4000
+        inv = next_inv(amt, f"Duplicate Delivery {prefix} {k+1}")
+        invoices.append(inv)
+        p_dupe = next_pay(amt, reference=inv.number, payer_name=inv.customer_name)
+        approved.append(
+            PaymentAllocation(
+                payment_id=p_dupe.payment_id,
+                invoice_id=inv.invoice_id,
+                amount_cents=amt,
+                status=AllocationStatus.APPROVED,
+                currency="USD",
+            )
+        )
+        payments.append(p_dupe)
+        truth[p_dupe.payment_id] = GroundTruthV2(
+            payment_id=p_dupe.payment_id,
+            scenario_group=ScenarioGroup.DUPLICATE_DELIVERY,
+            expected_outcome=MatchOutcome.NO_MATCH,
+        )
 
-    # 9. AMBIGUOUS_COLLISION: Two identical open invoices for $400 without differentiating reference (T6)
-    inv9a = next_inv(40000, "Ambiguous Customer A")
-    inv9b = next_inv(40000, "Ambiguous Customer B")
-    invoices.extend([inv9a, inv9b])
-    p9 = next_pay(40000, reference="", payer_name="Unidentified Buyer")
-    payments.append(p9)
-    truth[p9.payment_id] = GroundTruthV2(
-        payment_id=p9.payment_id,
-        scenario_group=ScenarioGroup.AMBIGUOUS_COLLISION,
-        expected_outcome=MatchOutcome.AMBIGUOUS,
-        is_ambiguous=True,
-    )
+    # 9. AMBIGUOUS_COLLISION: Two identical open invoices without differentiating reference (T6)
+    for k in range(cases_per_group):
+        amt = 42000 + k * 7000
+        inv_a = next_inv(amt, f"Ambiguous Cust A {prefix} {k+1}")
+        inv_b = next_inv(amt, f"Ambiguous Cust B {prefix} {k+1}")
+        invoices.extend([inv_a, inv_b])
+        p = next_pay(amt, reference="", payer_name=f"Anonymous Buyer {prefix} {k+1}")
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.AMBIGUOUS_COLLISION,
+            expected_outcome=MatchOutcome.AMBIGUOUS,
+            is_ambiguous=True,
+        )
 
     # 10. AMOUNT_ONLY_UNREFERENCED: Unreferenced payment with insufficient context -> NO_MATCH (T6)
-    inv10 = next_inv(55000, "Isolated Corp", days_offset=-60)
-    invoices.append(inv10)
-    p10 = next_pay(55000, reference="", payer_name="Stranger Without Account", days_offset=20)
-    payments.append(p10)
-    truth[p10.payment_id] = GroundTruthV2(
-        payment_id=p10.payment_id,
-        scenario_group=ScenarioGroup.AMOUNT_ONLY_UNREFERENCED,
-        expected_outcome=MatchOutcome.NO_MATCH,
-    )
+    for k in range(cases_per_group):
+        amt = 55000 + k * 6000
+        inv = next_inv(amt, f"Isolated Corp {prefix} {k+1}", days_offset=-60)
+        invoices.append(inv)
+        p = next_pay(amt, reference="", payer_name=f"Stranger Without Account {prefix} {k+1}", days_offset=20)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.AMOUNT_ONLY_UNREFERENCED,
+            expected_outcome=MatchOutcome.NO_MATCH,
+        )
 
     # 11. FULL_REFUND: Approved payment fully refunded, restoring invoice balance (T6)
-    inv11 = next_inv(70000, "Helix Healthcare")
-    invoices.append(inv11)
-    alloc_ref = PaymentAllocation(
-        payment_id="pay_ref_parent_1",
-        invoice_id=inv11.invoice_id,
-        amount_cents=70000,
-        status=AllocationStatus.APPROVED,
-        currency="USD",
-    )
-    approved.append(alloc_ref)
-    ref11 = Refund(
-        refund_id="ref_v2_1",
-        parent_payment_id="pay_ref_parent_1",
-        amount_cents=70000,
-        currency="USD",
-        refunded_at=base_time + timedelta(days=5),
-        invoice_id=inv11.invoice_id,
-    )
-    refunds.append(ref11)
-    # Customer pays again after refund
-    p11 = next_pay(70000, reference=inv11.number, payer_name="Helix Healthcare", days_offset=6)
-    payments.append(p11)
-    truth[p11.payment_id] = GroundTruthV2(
-        payment_id=p11.payment_id,
-        scenario_group=ScenarioGroup.FULL_REFUND,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv11.invoice_id, 70000),),
-    )
+    for k in range(cases_per_group):
+        amt = 70000 + k * 12000
+        inv = next_inv(amt, f"Helix Healthcare {prefix} {k+1}")
+        invoices.append(inv)
+        parent_pid = f"pay_ref_parent_{prefix.lower()}_{k+1}"
+        alloc_ref = PaymentAllocation(
+            payment_id=parent_pid,
+            invoice_id=inv.invoice_id,
+            amount_cents=amt,
+            status=AllocationStatus.APPROVED,
+            currency="USD",
+        )
+        approved.append(alloc_ref)
+        ref = Refund(
+            refund_id=f"ref_v2_{prefix.lower()}_{k+1}",
+            parent_payment_id=parent_pid,
+            amount_cents=amt,
+            currency="USD",
+            refunded_at=base_time + timedelta(days=5),
+            invoice_id=inv.invoice_id,
+        )
+        refunds.append(ref)
+        p = next_pay(amt, reference=inv.number, payer_name=inv.customer_name, days_offset=6)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.FULL_REFUND,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, amt),),
+        )
 
     # 12. PARTIAL_REFUND: Partial refund restoring net balance (T6)
-    inv12 = next_inv(100000, "Infinity Innovations")
-    invoices.append(inv12)
-    alloc_pref = PaymentAllocation(
-        payment_id="pay_pref_parent_1",
-        invoice_id=inv12.invoice_id,
-        amount_cents=100000,
-        status=AllocationStatus.APPROVED,
-        currency="USD",
-    )
-    approved.append(alloc_pref)
-    ref12 = Refund(
-        refund_id="ref_v2_2",
-        parent_payment_id="pay_pref_parent_1",
-        amount_cents=30000,
-        currency="USD",
-        refunded_at=base_time + timedelta(days=7),
-        invoice_id=inv12.invoice_id,
-    )
-    refunds.append(ref12)
-    # Remaining capacity restored to 30,000
-    p12 = next_pay(30000, reference=inv12.number, payer_name="Infinity Innovations", days_offset=8)
-    payments.append(p12)
-    truth[p12.payment_id] = GroundTruthV2(
-        payment_id=p12.payment_id,
-        scenario_group=ScenarioGroup.PARTIAL_REFUND,
-        expected_outcome=MatchOutcome.PROPOSED,
-        expected_allocations=((inv12.invoice_id, 30000),),
-    )
+    for k in range(cases_per_group):
+        inv_amt = 100000 + k * 15000
+        ref_amt = 35000 + k * 5000
+        inv = next_inv(inv_amt, f"Infinity Innovations {prefix} {k+1}")
+        invoices.append(inv)
+        parent_pid = f"pay_pref_parent_{prefix.lower()}_{k+1}"
+        alloc_pref = PaymentAllocation(
+            payment_id=parent_pid,
+            invoice_id=inv.invoice_id,
+            amount_cents=inv_amt,
+            status=AllocationStatus.APPROVED,
+            currency="USD",
+        )
+        approved.append(alloc_pref)
+        ref = Refund(
+            refund_id=f"ref_v2_part_{prefix.lower()}_{k+1}",
+            parent_payment_id=parent_pid,
+            amount_cents=ref_amt,
+            currency="USD",
+            refunded_at=base_time + timedelta(days=7),
+            invoice_id=inv.invoice_id,
+        )
+        refunds.append(ref)
+        p = next_pay(ref_amt, reference=inv.number, payer_name=inv.customer_name, days_offset=8)
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.PARTIAL_REFUND,
+            expected_outcome=MatchOutcome.PROPOSED,
+            expected_allocations=((inv.invoice_id, ref_amt),),
+        )
 
     # 13. CURRENCY_MISMATCH: Payment in EUR against USD invoice (T6)
-    inv13 = next_inv(48000, "Jovian Holdings", currency="USD")
-    invoices.append(inv13)
-    p13 = next_pay(48000, reference=inv13.number, payer_name="Jovian Holdings", currency="EUR")
-    payments.append(p13)
-    truth[p13.payment_id] = GroundTruthV2(
-        payment_id=p13.payment_id,
-        scenario_group=ScenarioGroup.CURRENCY_MISMATCH,
-        expected_outcome=MatchOutcome.NO_MATCH,
-    )
+    for k in range(cases_per_group):
+        amt = 48000 + k * 5000
+        inv = next_inv(amt, f"Jovian Holdings {prefix} {k+1}", currency="USD")
+        invoices.append(inv)
+        p = next_pay(amt, reference=inv.number, payer_name=inv.customer_name, currency="EUR")
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.CURRENCY_MISMATCH,
+            expected_outcome=MatchOutcome.NO_MATCH,
+        )
 
     # 14. CONFLICTING_EVIDENCE: Reference to non-existent invoice (T6)
-    p14 = next_pay(99000, reference="INV-NON-EXISTENT-9999", payer_name="Lost Customer")
-    payments.append(p14)
-    truth[p14.payment_id] = GroundTruthV2(
-        payment_id=p14.payment_id,
-        scenario_group=ScenarioGroup.CONFLICTING_EVIDENCE,
-        expected_outcome=MatchOutcome.NO_MATCH,
-    )
+    for k in range(cases_per_group):
+        amt = 99000 + k * 2500
+        p = next_pay(
+            amt,
+            reference=f"INV-NONEXISTENT-{prefix}-{k+1:04d}",
+            payer_name=f"Lost Customer {prefix} {k+1}",
+        )
+        payments.append(p)
+        truth[p.payment_id] = GroundTruthV2(
+            payment_id=p.payment_id,
+            scenario_group=ScenarioGroup.CONFLICTING_EVIDENCE,
+            expected_outcome=MatchOutcome.NO_MATCH,
+        )
 
     return BenchmarkV2Dataset(
         seed=seed,
@@ -399,6 +446,7 @@ class BenchmarkV2Metrics:
     f1_score: float
     accuracy: float
     scenario_breakdown: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    confusion_matrix: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 def evaluate_matcher_v2(matcher: Matcher, dataset: BenchmarkV2Dataset) -> BenchmarkV2Metrics:
@@ -410,6 +458,8 @@ def evaluate_matcher_v2(matcher: Matcher, dataset: BenchmarkV2Dataset) -> Benchm
         kwargs["settlements"] = dataset.provider_settlements
     if "refunds" in matcher_sig.parameters:
         kwargs["refunds"] = dataset.refunds
+    if "reversals" in matcher_sig.parameters:
+        kwargs["reversals"] = dataset.reversals
 
     proposals = matcher.match(dataset.payments, dataset.invoices, **kwargs)
     prop_by_pay: dict[str, MatchProposal] = {p.payment_id: p for p in proposals}
@@ -427,11 +477,19 @@ def evaluate_matcher_v2(matcher: Matcher, dataset: BenchmarkV2Dataset) -> Benchm
 
     scenario_stats: dict[str, dict[str, int]] = {}
 
+    # 3x3 Confusion Matrix: Actual (row) -> Predicted (col)
+    outcomes = ["PROPOSED", "AMBIGUOUS", "NO_MATCH"]
+    confusion_matrix: dict[str, dict[str, int]] = {
+        act: {pred: 0 for pred in outcomes} for act in outcomes
+    }
+
     # Check capacity constraints
     inv_by_id = {inv.invoice_id: inv for inv in dataset.invoices}
     deductions = list(dataset.approved_allocations) + list(dataset.provider_settlements)
     initial_balances = {
-        inv.invoice_id: outstanding_cents(inv, deductions, refunds=dataset.refunds)
+        inv.invoice_id: outstanding_cents(
+            inv, deductions, refunds=dataset.refunds, reversals=dataset.reversals
+        )
         for inv in dataset.invoices
     }
 
@@ -501,6 +559,20 @@ def evaluate_matcher_v2(matcher: Matcher, dataset: BenchmarkV2Dataset) -> Benchm
         if is_correct:
             scenario_stats[sc]["correct"] += 1
 
+        # Record confusion matrix
+        act_key = (
+            "PROPOSED"
+            if gt.expected_outcome is MatchOutcome.PROPOSED
+            else ("AMBIGUOUS" if gt.expected_outcome is MatchOutcome.AMBIGUOUS else "NO_MATCH")
+        )
+        if outcome is MatchOutcome.PROPOSED:
+            pred_key = "PROPOSED"
+        elif outcome is MatchOutcome.AMBIGUOUS:
+            pred_key = "AMBIGUOUS"
+        else:
+            pred_key = "NO_MATCH"
+        confusion_matrix[act_key][pred_key] += 1
+
         # Check invariant violations
         if outcome is MatchOutcome.PROPOSED and prop.candidates:
             if pid in allocated_per_pay:
@@ -536,6 +608,7 @@ def evaluate_matcher_v2(matcher: Matcher, dataset: BenchmarkV2Dataset) -> Benchm
         f1_score=f1,
         accuracy=acc,
         scenario_breakdown=scenario_stats,
+        confusion_matrix=confusion_matrix,
     )
 
 
@@ -581,4 +654,40 @@ def format_benchmark_v2_table(metrics_list: Sequence[BenchmarkV2Metrics]) -> str
     lines.append(separator_line)
     for row in rows[1:]:
         lines.append(" | ".join(val.ljust(col_widths[i]) for i, val in enumerate(row)))
+    return "\n".join(lines)
+
+
+def format_confusion_matrix(metrics: BenchmarkV2Metrics) -> str:
+    """Format the 3x3 confusion matrix into a clean markdown table."""
+    cm = metrics.confusion_matrix
+    headers = [f"{metrics.matcher_name}: Actual \\ Pred", "PROPOSED", "AMBIGUOUS", "NO_MATCH"]
+    rows = [
+        ["PROPOSED", str(cm.get("PROPOSED", {}).get("PROPOSED", 0)), str(cm.get("PROPOSED", {}).get("AMBIGUOUS", 0)), str(cm.get("PROPOSED", {}).get("NO_MATCH", 0))],
+        ["AMBIGUOUS", str(cm.get("AMBIGUOUS", {}).get("PROPOSED", 0)), str(cm.get("AMBIGUOUS", {}).get("AMBIGUOUS", 0)), str(cm.get("AMBIGUOUS", {}).get("NO_MATCH", 0))],
+        ["NO_MATCH", str(cm.get("NO_MATCH", {}).get("PROPOSED", 0)), str(cm.get("NO_MATCH", {}).get("AMBIGUOUS", 0)), str(cm.get("NO_MATCH", {}).get("NO_MATCH", 0))],
+    ]
+    col_widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers))]
+    lines = []
+    lines.append(" | ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers))))
+    lines.append("-+-".join("-" * col_widths[i] for i in range(len(headers))))
+    for r in rows:
+        lines.append(" | ".join(r[i].ljust(col_widths[i]) for i in range(len(headers))))
+    return "\n".join(lines)
+
+
+def format_scenario_breakdown(metrics: BenchmarkV2Metrics) -> str:
+    """Format scenario group performance metrics into a markdown table."""
+    headers = ["Scenario Family", "Total", "Correct", "Accuracy (%)"]
+    rows = []
+    for sc, data in sorted(metrics.scenario_breakdown.items()):
+        tot = data.get("total", 0)
+        corr = data.get("correct", 0)
+        pct = f"{(corr / tot):.1%}" if tot > 0 else "N/A"
+        rows.append([sc, str(tot), str(corr), pct])
+    col_widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers))]
+    lines = []
+    lines.append(" | ".join(headers[i].ljust(col_widths[i]) for i in range(len(headers))))
+    lines.append("-+-".join("-" * col_widths[i] for i in range(len(headers))))
+    for r in rows:
+        lines.append(" | ".join(r[i].ljust(col_widths[i]) for i in range(len(headers))))
     return "\n".join(lines)

@@ -186,7 +186,7 @@ class Payment:
 
 @dataclass(frozen=True)
 class Refund:
-    """External refund or reversal linked to a parent payment."""
+    """External merchant-initiated refund linked to a parent payment."""
 
     refund_id: str
     parent_payment_id: str
@@ -196,11 +196,38 @@ class Refund:
     status: str = "COMPLETED"
     reason: str = ""
     invoice_id: Optional[str] = None
+    target_type: str = "UNKNOWN"  # "SETTLEMENT", "ALLOCATION", "UNKNOWN"
+    settlement_id: Optional[str] = None
+    allocation_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require(bool(self.refund_id), "refund_id is required")
         _require(bool(self.parent_payment_id), "parent_payment_id is required")
         _require(self.amount_cents > 0, "refund amount must be positive")
+        _require(len(self.currency) == 3, "currency must be a 3-letter code")
+
+
+@dataclass(frozen=True)
+class PaymentReversal:
+    """Involuntary processor/network reversal (e.g. chargeback, ACH return, dispute clawback)."""
+
+    reversal_id: str
+    parent_payment_id: str
+    amount_cents: int
+    currency: str
+    reversed_at: datetime
+    status: str = "COMPLETED"
+    reason: str = ""
+    dispute_id: Optional[str] = None
+    invoice_id: Optional[str] = None
+    target_type: str = "UNKNOWN"  # "SETTLEMENT", "ALLOCATION", "UNKNOWN"
+    settlement_id: Optional[str] = None
+    allocation_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require(bool(self.reversal_id), "reversal_id is required")
+        _require(bool(self.parent_payment_id), "parent_payment_id is required")
+        _require(self.amount_cents > 0, "reversal amount must be positive")
         _require(len(self.currency) == 3, "currency must be a 3-letter code")
 
 
@@ -453,8 +480,9 @@ def outstanding_cents(
     invoice: Invoice,
     allocations: Iterable[PaymentAllocation],
     refunds: Iterable[Refund] = (),
+    reversals: Iterable[PaymentReversal] = (),
 ) -> int:
-    """Invoice total minus APPROVED allocations only, plus approved refunds.
+    """Invoice total minus APPROVED allocations only, plus approved refunds and reversals.
 
     Proposed and rejected allocations never count. Repeated allocations for the
     same payment on this invoice are counted only once to prevent duplicate deductions.
@@ -467,8 +495,8 @@ def outstanding_cents(
     A negative result means the ledger over-allocated the invoice; callers should treat that
     as a bug, so it is deliberately not clamped to zero.
 
-    Approved refunds linked to approved payments on this invoice restore outstanding balance.
-    Refunds cannot exceed the approved payment amount on the invoice. Duplicate refunds
+    Approved refunds and reversals linked to approved payments on this invoice restore outstanding balance.
+    Refunds and reversals cannot exceed the approved payment amount on the invoice. Duplicate refunds/reversals
     with matching amounts are deduplicated safely; conflicting amounts raise AccountingError.
     """
     seen_payments: dict[str, int] = {}
@@ -516,12 +544,32 @@ def outstanding_cents(
                 seen_refunds[r.refund_id] = r.amount_cents
                 refunded += r.amount_cents
 
-    if refunded > approved:
+    reversed_amt = 0
+    seen_reversals: dict[str, int] = {}
+    for rev in reversals:
+        if rev.status.upper() == "COMPLETED" and (rev.invoice_id is None or rev.invoice_id == invoice.invoice_id):
+            if rev.parent_payment_id in seen_payments:
+                if rev.currency.strip().upper() != inv_curr:
+                    raise AccountingError(
+                        f"Currency mismatch for reversal {rev.reversal_id!r}: {rev.currency} vs invoice {inv_curr}"
+                    )
+                if rev.reversal_id in seen_reversals:
+                    if seen_reversals[rev.reversal_id] != rev.amount_cents:
+                        raise AccountingError(
+                            f"Conflicting reversal amount for {rev.reversal_id!r}: {seen_reversals[rev.reversal_id]} cents != {rev.amount_cents} cents"
+                        )
+                    continue
+                seen_reversals[rev.reversal_id] = rev.amount_cents
+                reversed_amt += rev.amount_cents
+
+    total_returns = refunded + reversed_amt
+    if total_returns > approved:
         raise AccountingError(
-            f"Total refunds ({refunded} cents) exceed approved allocations ({approved} cents) on invoice {invoice.number}"
+            f"Total returns ({total_returns} cents: {refunded} refunds, {reversed_amt} reversals) "
+            f"exceed approved allocations ({approved} cents) on invoice {invoice.number}"
         )
 
-    net_deductions = approved - refunded
+    net_deductions = approved - total_returns
     return invoice.amount_cents - net_deductions
 
 
@@ -583,13 +631,14 @@ def cross_check_invoice_balance(
     invoice: Invoice,
     allocations: Iterable[PaymentAllocation],
     refunds: Iterable[Refund] = (),
+    reversals: Iterable[PaymentReversal] = (),
 ) -> int:
     """Calculate ledger balance and verify it agrees with PayPal due_amount.
 
     Treats PayPal due_amount as an independent cross-check against the ledger balance.
     Fails closed (raises AccountingError) if PayPal due_amount contradicts the calculated balance.
     """
-    calculated = outstanding_cents(invoice, allocations, refunds=refunds)
+    calculated = outstanding_cents(invoice, allocations, refunds=refunds, reversals=reversals)
     if invoice.due_amount_cents is not None and invoice.due_amount_cents != calculated:
         raise AccountingError(
             f"Accounting inconsistency for invoice {invoice.number}: "
