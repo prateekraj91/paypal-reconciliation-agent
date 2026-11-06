@@ -26,6 +26,7 @@ from .schema import (
     AllocationRecord,
     ProviderSettlementRecord,
     RefundRecord,
+    InvestigationRecord,
 )
 from .repositories import (
     TenantRepository,
@@ -38,6 +39,7 @@ from .repositories import (
     AllocationRepository,
     ProviderSettlementRepository,
     RefundRepository,
+    InvestigationRepository,
     AuditRepository,
 )
 from .approval import ApprovalService, ApprovalResult
@@ -82,6 +84,7 @@ class StorageWorkflow:
         self.allocation_repo = AllocationRepository(session)
         self.settlement_repo = ProviderSettlementRepository(session)
         self.refund_repo = RefundRepository(session)
+        self.investigation_repo = InvestigationRepository(session)
         self.audit_repo = AuditRepository(session)
         self.approval_service = ApprovalService(session)
 
