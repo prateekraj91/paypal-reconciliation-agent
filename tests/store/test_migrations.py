@@ -53,6 +53,7 @@ def test_alembic_upgrade_and_downgrade(temp_sqlite_url):
         "audit_events",
         "jobs",
         "webhook_inbox",
+        "refunds",
         "alembic_version",
     }
     assert expected_tables.issubset(tables), f"Missing tables: {expected_tables - tables}"
@@ -309,3 +310,65 @@ def test_d4_migration_0003_upgrade_downgrade(temp_sqlite_url):
         assert alloc is not None
         assert alloc.decision_id is None
         assert alloc.amount_minor == 10000
+
+
+def test_d5_migration_0004_upgrade_downgrade(temp_sqlite_url):
+    """Verify migration 0004 creates refunds table, proposal columns, and downgrades cleanly."""
+    os.environ["RECONCILE_DB_URL"] = temp_sqlite_url
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", temp_sqlite_url)
+
+    # 1. Upgrade up to 0003
+    command.upgrade(alembic_cfg, "0003_d4_provider_settlements")
+    engine = DatabaseEngine(DatabaseConfig(url=temp_sqlite_url)).engine
+    inspector = inspect(engine)
+    tables_0003 = set(inspector.get_table_names())
+    assert "refunds" not in tables_0003
+
+    # 2. Upgrade to 0004_d5_advanced_reconciliation
+    command.upgrade(alembic_cfg, "0004_d5_advanced_reconciliation")
+    inspector = inspect(engine)
+    tables_0004 = set(inspector.get_table_names())
+    assert "refunds" in tables_0004
+
+    proposal_cols = {col["name"] for col in inspector.get_columns("proposals")}
+    assert "excess_amount_minor" in proposal_cols
+    assert "ambiguity_certificate_json" in proposal_cols
+
+    # Test inserting a refund row
+    db = DatabaseEngine(DatabaseConfig(url=temp_sqlite_url))
+    with db.session() as session:
+        session.execute(
+            text("INSERT INTO tenants (id, name, created_at, updated_at) VALUES ('t_d5', 'D5 Tenant', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        )
+        session.execute(
+            text(
+                "INSERT INTO payments (id, tenant_id, provider, provider_payment_id, amount_minor, currency, "
+                "status, received_at, version, created_at, updated_at) "
+                "VALUES ('pay_d5', 't_d5', 'paypal', 'PAY-D5-1', 10000, 'USD', "
+                "'COMPLETED', CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        session.execute(
+            text(
+                "INSERT INTO refunds (id, tenant_id, provider, provider_refund_id, parent_payment_id, amount_minor, currency, "
+                "status, reason, refunded_at, created_at) "
+                "VALUES ('ref_d5', 't_d5', 'paypal', 'REF-D5-1', 'pay_d5', 2000, 'USD', "
+                "'COMPLETED', 'Customer requested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        session.commit()
+
+        ref_row = session.execute(text("SELECT * FROM refunds WHERE id='ref_d5'")).fetchone()
+        assert ref_row is not None
+        assert ref_row.amount_minor == 2000
+
+    # 3. Downgrade back to 0003
+    command.downgrade(alembic_cfg, "0003_d4_provider_settlements")
+    inspector = inspect(engine)
+    tables_downgraded = set(inspector.get_table_names())
+    assert "refunds" not in tables_downgraded
+
+    proposal_cols_after = {col["name"] for col in inspector.get_columns("proposals")}
+    assert "excess_amount_minor" not in proposal_cols_after
+    assert "ambiguity_certificate_json" not in proposal_cols_after

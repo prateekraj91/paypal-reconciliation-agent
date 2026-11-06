@@ -22,6 +22,8 @@ from .models import (
     Invoice,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
+    Refund,
     cross_check_invoice_balance,
 )
 from .normalize import canonical_reference
@@ -39,11 +41,17 @@ class MatchRun:
         invoices: Sequence[Invoice],
         approved: Sequence[PaymentAllocation] = (),
         settlements: Sequence[PaymentAllocation] = (),
+        refunds: Sequence[Refund] = (),
+        reversals: Sequence[PaymentReversal] = (),
     ) -> None:
         self.invoices: list[Invoice] = list(invoices)
+        self.refunds: list[Refund] = list(refunds)
+        self.reversals: list[PaymentReversal] = list(reversals)
         all_deductions = list(approved) + list(settlements)
         self.outstanding: dict[str, int] = {
-            i.invoice_id: cross_check_invoice_balance(i, all_deductions)
+            i.invoice_id: cross_check_invoice_balance(
+                i, all_deductions, refunds=self.refunds, reversals=self.reversals
+            )
             for i in self.invoices
         }
         self.by_ref: dict[str, list[Invoice]] = {}

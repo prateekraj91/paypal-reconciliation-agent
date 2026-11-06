@@ -27,6 +27,8 @@ from reconcile_store.schema import (
     PaymentRecord,
     ProposalRecord,
     ConnectionRecord,
+    RefundRecord,
+    AuditEventRecord,
 )
 from reconcile_store.repositories.tenant_repo import TenantRepository, ConnectionRepository
 from reconcile_store.repositories.webhook_repo import WebhookInboxRepository
@@ -542,5 +544,201 @@ def test_worker_resolve_paypal_client_sandbox_vs_live(store, monkeypatch):
     )
     client_us = worker.resolve_paypal_client_for_connection(conn_us)
     assert client_us.client_id == "test-client-id"
+
+
+def test_worker_processes_payment_capture_reversed(store, mock_paypal):
+    """Verify worker processes PAYMENT.CAPTURE.REVERSED and records an involuntary processor reversal."""
+    capture_id = "CAP-REV-100"
+    event_payload = {
+        "id": "WH-REV-1",
+        "event_type": "PAYMENT.CAPTURE.REVERSED",
+        "resource": {
+            "id": capture_id,
+            "amount": {"currency_code": "USD", "value": "150.00"},
+            "reason_code": "CHARGEBACK",
+            "dispute_id": "DISP-999",
+            "update_time": "2026-11-06T12:00:00Z",
+        },
+    }
+    with store.session() as s:
+        inbox = WebhookInboxRepository(s).record_receipt(
+            tenant_id="t1",
+            provider="paypal",
+            environment="sandbox",
+            event_id="WH-REV-1",
+            event_type="PAYMENT.CAPTURE.REVERSED",
+            raw_payload=json.dumps(event_payload),
+            verification_status="VERIFIED",
+        )
+        job = JobRepository(s).enqueue_job(
+            tenant_id="t1",
+            job_type="WEBHOOK_INGEST",
+            idempotency_key="wh:sandbox:WH-REV-1",
+            payload={"receipt_id": inbox.id, "event_type": "PAYMENT.CAPTURE.REVERSED", "resource_id": capture_id},
+        )
+        inbox.job_id = job.id
+        inbox.processing_status = "QUEUED"
+        s.commit()
+
+    worker = Worker(db_engine=store, paypal_client=mock_paypal)
+    processed_job = worker.run_once(tenant_id="t1")
+    assert processed_job is not None
+    assert processed_job.status == "COMPLETED"
+
+    with store.session() as s:
+        ref_rec = s.query(RefundRecord).filter_by(tenant_id="t1", record_type="REVERSAL").first()
+        assert ref_rec is not None
+        assert ref_rec.amount_minor == 15000
+        assert ref_rec.dispute_id == "DISP-999"
+        assert ref_rec.reason == "CHARGEBACK"
+
+        # Check audit event
+        aud = s.query(AuditEventRecord).filter_by(tenant_id="t1", event_type="PAYMENT_REVERSAL_RECORDED").first()
+        assert aud is not None
+        aud_payload = json.loads(aud.payload_json)
+        assert aud_payload["details"]["dispute_id"] == "DISP-999"
+
+
+def test_worker_processes_customer_dispute_resolved_buyer_favour(store, mock_paypal):
+    """Verify worker processes CUSTOMER.DISPUTE.RESOLVED in buyer's favour and records reversal."""
+    dispute_id = "PP-D-BUYER-1"
+    event_payload = {
+        "id": "WH-DISP-BUYER-1",
+        "event_type": "CUSTOMER.DISPUTE.RESOLVED",
+        "resource": {
+            "dispute_id": dispute_id,
+            "disputed_transactions": [{"seller_transaction_id": "CAP-DISP-PARENT-1"}],
+            "dispute_outcome": {
+                "outcome_code": "RESOLVED_BUYER_FAVOUR",
+                "amount": {"currency_code": "USD", "value": "75.00"},
+            },
+            "update_time": "2026-11-06T12:00:00Z",
+        },
+    }
+    with store.session() as s:
+        inbox = WebhookInboxRepository(s).record_receipt(
+            tenant_id="t1",
+            provider="paypal",
+            environment="sandbox",
+            event_id="WH-DISP-BUYER-1",
+            event_type="CUSTOMER.DISPUTE.RESOLVED",
+            raw_payload=json.dumps(event_payload),
+            verification_status="VERIFIED",
+        )
+        job = JobRepository(s).enqueue_job(
+            tenant_id="t1",
+            job_type="WEBHOOK_INGEST",
+            idempotency_key="wh:sandbox:WH-DISP-BUYER-1",
+            payload={"receipt_id": inbox.id, "event_type": "CUSTOMER.DISPUTE.RESOLVED", "resource_id": dispute_id},
+        )
+        inbox.job_id = job.id
+        inbox.processing_status = "QUEUED"
+        s.commit()
+
+    worker = Worker(db_engine=store, paypal_client=mock_paypal)
+    processed_job = worker.run_once(tenant_id="t1")
+    assert processed_job is not None
+    assert processed_job.status == "COMPLETED"
+
+    with store.session() as s:
+        ref_rec = s.query(RefundRecord).filter_by(tenant_id="t1", dispute_id=dispute_id).first()
+        assert ref_rec is not None
+        assert ref_rec.amount_minor == 7500
+        assert ref_rec.record_type == "REVERSAL"
+
+
+def test_worker_processes_customer_dispute_resolved_seller_favour_no_financial_change(store, mock_paypal):
+    """Verify worker does NOT alter financial balances when dispute resolves in merchant/seller favour."""
+    dispute_id = "PP-D-SELLER-1"
+    event_payload = {
+        "id": "WH-DISP-SELLER-1",
+        "event_type": "CUSTOMER.DISPUTE.RESOLVED",
+        "resource": {
+            "dispute_id": dispute_id,
+            "disputed_transactions": [{"seller_transaction_id": "CAP-DISP-PARENT-2"}],
+            "dispute_outcome": {
+                "outcome_code": "RESOLVED_SELLER_FAVOUR",
+                "amount": {"currency_code": "USD", "value": "100.00"},
+            },
+            "update_time": "2026-11-06T12:00:00Z",
+        },
+    }
+    with store.session() as s:
+        inbox = WebhookInboxRepository(s).record_receipt(
+            tenant_id="t1",
+            provider="paypal",
+            environment="sandbox",
+            event_id="WH-DISP-SELLER-1",
+            event_type="CUSTOMER.DISPUTE.RESOLVED",
+            raw_payload=json.dumps(event_payload),
+            verification_status="VERIFIED",
+        )
+        job = JobRepository(s).enqueue_job(
+            tenant_id="t1",
+            job_type="WEBHOOK_INGEST",
+            idempotency_key="wh:sandbox:WH-DISP-SELLER-1",
+            payload={"receipt_id": inbox.id, "event_type": "CUSTOMER.DISPUTE.RESOLVED", "resource_id": dispute_id},
+        )
+        inbox.job_id = job.id
+        inbox.processing_status = "QUEUED"
+        s.commit()
+
+    worker = Worker(db_engine=store, paypal_client=mock_paypal)
+    processed_job = worker.run_once(tenant_id="t1")
+    assert processed_job is not None
+    assert processed_job.status == "COMPLETED"
+
+    with store.session() as s:
+        # Crucial check: NO reversal record created for seller-favour outcome
+        ref_rec = s.query(RefundRecord).filter_by(tenant_id="t1", dispute_id=dispute_id).first()
+        assert ref_rec is None
+
+
+def test_worker_processes_payment_capture_refunded(store, mock_paypal):
+    """Verify worker processes PAYMENT.CAPTURE.REFUNDED and records a voluntary merchant refund."""
+    refund_id = "REF-MCH-1"
+    capture_id = "CAP-ORIG-1"
+    event_payload = {
+        "id": "WH-REF-1",
+        "event_type": "PAYMENT.CAPTURE.REFUNDED",
+        "resource": {
+            "id": refund_id,
+            "capture_id": capture_id,
+            "amount": {"currency_code": "USD", "value": "50.00"},
+            "note_to_payer": "Customer return",
+            "create_time": "2026-11-06T12:00:00Z",
+        },
+    }
+    with store.session() as s:
+        inbox = WebhookInboxRepository(s).record_receipt(
+            tenant_id="t1",
+            provider="paypal",
+            environment="sandbox",
+            event_id="WH-REF-1",
+            event_type="PAYMENT.CAPTURE.REFUNDED",
+            raw_payload=json.dumps(event_payload),
+            verification_status="VERIFIED",
+        )
+        job = JobRepository(s).enqueue_job(
+            tenant_id="t1",
+            job_type="WEBHOOK_INGEST",
+            idempotency_key="wh:sandbox:WH-REF-1",
+            payload={"receipt_id": inbox.id, "event_type": "PAYMENT.CAPTURE.REFUNDED", "resource_id": refund_id},
+        )
+        inbox.job_id = job.id
+        inbox.processing_status = "QUEUED"
+        s.commit()
+
+    worker = Worker(db_engine=store, paypal_client=mock_paypal)
+    processed_job = worker.run_once(tenant_id="t1")
+    assert processed_job is not None
+    assert processed_job.status == "COMPLETED"
+
+    with store.session() as s:
+        ref_rec = s.query(RefundRecord).filter_by(tenant_id="t1", provider_refund_id=refund_id).first()
+        assert ref_rec is not None
+        assert ref_rec.amount_minor == 5000
+        assert ref_rec.record_type == "REFUND"
+
 
 

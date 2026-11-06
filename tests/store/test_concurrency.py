@@ -312,3 +312,245 @@ def test_postgresql_concurrent_competing_approvals():
     finally:
         _cleanup_tenant(pg_db, tenant_id)
         pg_db.dispose()
+
+
+def _setup_competing_partial_proposals(
+    engine: DatabaseEngine,
+    tenant_id: str,
+    inv_total: int,
+    pay1_amount: int,
+    pay2_amount: int,
+):
+    """Setup one invoice and two competing partial payments/proposals attempting to consume capacity."""
+    with engine.session() as session:
+        t_repo = TenantRepository(session)
+        inv_repo = InvoiceRepository(session)
+        pay_repo = PaymentRepository(session)
+        run_repo = ReconciliationRunRepository(session)
+        prop_repo = ProposalRepository(session)
+
+        t_repo.get_or_create_tenant(tenant_id, "Concurrency Partial Tenant")
+
+        inv = inv_repo.upsert_invoice(
+            tenant_id=tenant_id,
+            provider="paypal",
+            provider_invoice_id=f"INV-PART-{tenant_id}",
+            invoice_number=f"INV-{tenant_id}",
+            total_minor=inv_total,
+            currency="USD",
+            status="SENT",
+            customer_name="Partial Payer",
+        )
+        pay1 = pay_repo.upsert_payment(
+            tenant_id=tenant_id,
+            provider="paypal",
+            provider_payment_id=f"PAY-PART-1-{tenant_id}",
+            amount_minor=pay1_amount,
+            currency="USD",
+            status="COMPLETED",
+            reference=f"INV-{tenant_id}",
+            payer_name="Partial Payer 1",
+        )
+        pay2 = pay_repo.upsert_payment(
+            tenant_id=tenant_id,
+            provider="paypal",
+            provider_payment_id=f"PAY-PART-2-{tenant_id}",
+            amount_minor=pay2_amount,
+            currency="USD",
+            status="COMPLETED",
+            reference=f"INV-{tenant_id}",
+            payer_name="Partial Payer 2",
+        )
+        run = run_repo.create_run(
+            tenant_id=tenant_id,
+            input_snapshot_id=f"snap-part-{tenant_id}",
+            matcher_name="advanced-matcher-d5",
+        )
+        prop1 = prop_repo.create_proposal(
+            tenant_id=tenant_id,
+            run_id=run.id,
+            payment_id=pay1.id,
+            outcome="PROPOSED",
+            evidence=["REFERENCE_MATCH", "AMOUNT_PARTIAL"],
+            allocations=[{"invoice_id": inv.id, "amount_minor": pay1_amount, "currency": "USD"}],
+        )
+        prop2 = prop_repo.create_proposal(
+            tenant_id=tenant_id,
+            run_id=run.id,
+            payment_id=pay2.id,
+            outcome="PROPOSED",
+            evidence=["REFERENCE_MATCH", "AMOUNT_PARTIAL"],
+            allocations=[{"invoice_id": inv.id, "amount_minor": pay2_amount, "currency": "USD"}],
+        )
+        session.commit()
+        return inv.id, prop1.id, prop2.id
+
+
+def test_postgresql_concurrent_partial_payments_cannot_exceed_capacity():
+    """Verify two concurrent database sessions cannot allocate partial payments exceeding invoice capacity.
+
+    Invoice capacity: 10,000 cents ($100).
+    Payment 1: 6,000 cents ($60).
+    Payment 2: 6,000 cents ($60).
+    Total requested: 12,000 cents > 10,000 cents.
+
+    Requirements:
+    - PostgreSQL row-level locks serialize access to the invoice.
+    - Exactly one partial payment succeeds (6,000 cents allocated).
+    - Competing partial payment fails closed on verifier / capacity check (remaining 4,000 < 6,000).
+    - Remaining invoice capacity is exactly 4,000 cents (never negative).
+    """
+    pg_url = _detect_postgresql_url()
+    if not pg_url:
+        pytest.skip("PostgreSQL is not reachable on localhost:5432.")
+
+    os.environ["RECONCILE_DB_URL"] = pg_url
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", pg_url)
+    command.upgrade(alembic_cfg, "head")
+
+    pg_db = DatabaseEngine(DatabaseConfig(url=pg_url))
+    tenant_id = f"pg_part_{uuid.uuid4().hex[:10]}"
+
+    try:
+        inv_id, prop1_id, prop2_id = _setup_competing_partial_proposals(
+            pg_db, tenant_id, inv_total=10000, pay1_amount=6000, pay2_amount=6000
+        )
+
+        results = []
+        errors = []
+
+        def attempt_approval(prop_id: str, actor: str, key: str):
+            with pg_db.session() as session:
+                svc = ApprovalService(session)
+                try:
+                    res = svc.approve_proposal(
+                        tenant_id=tenant_id,
+                        proposal_id=prop_id,
+                        actor=actor,
+                        idempotency_key=key,
+                    )
+                    results.append((prop_id, res))
+                except Exception as e:
+                    errors.append((prop_id, type(e).__name__, str(e)))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            f1 = executor.submit(attempt_approval, prop1_id, "part_actor_1", f"part-key-1-{tenant_id}")
+            f2 = executor.submit(attempt_approval, prop2_id, "part_actor_2", f"part-key-2-{tenant_id}")
+            concurrent.futures.wait([f1, f2])
+
+        error_details = "\n".join(f"  - Proposal {prop}: {etype}: {msg}" for prop, etype, msg in errors)
+        assert len(results) == 1, (
+            f"Expected exactly 1 partial approval winner, got {len(results)}.\n"
+            f"Results: {results}\n"
+            f"Errors ({len(errors)}):\n{error_details}"
+        )
+        assert len(errors) == 1, (
+            f"Expected exactly 1 loser rejection due to capacity limits, got {len(errors)}.\n"
+            f"Errors:\n{error_details}"
+        )
+
+        with pg_db.session() as session:
+            inv_repo = InvoiceRepository(session)
+            alloc_repo = AllocationRepository(session)
+            audit_repo = AuditRepository(session)
+
+            rem = inv_repo.get_ledger_outstanding_minor(tenant_id, inv_id)
+            assert rem == 4000, f"Expected 4000 cents remaining capacity, got {rem}"
+
+            allocs = alloc_repo.get_all_allocations(tenant_id)
+            assert len(allocs) == 1
+            assert allocs[0].amount_minor == 6000
+
+            audit_repo.verify_tenant_chain(tenant_id)
+    finally:
+        _cleanup_tenant(pg_db, tenant_id)
+        pg_db.dispose()
+
+
+def test_postgresql_concurrent_duplicate_processing_idempotency():
+    """Verify duplicate processing in PostgreSQL remains idempotent under concurrent execution.
+
+    Requirements:
+    - Independent database sessions attempting concurrent approval of the same proposal
+      with the same idempotency key cannot create duplicate allocations.
+    - Exactly one allocation is created in the ledger.
+    - Replay returns idempotent success.
+    - Invoice capacity is only deducted once.
+    """
+    pg_url = _detect_postgresql_url()
+    if not pg_url:
+        pytest.skip("PostgreSQL is not reachable on localhost:5432.")
+
+    os.environ["RECONCILE_DB_URL"] = pg_url
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", pg_url)
+    command.upgrade(alembic_cfg, "head")
+
+    pg_db = DatabaseEngine(DatabaseConfig(url=pg_url))
+    tenant_id = f"pg_idemp_{uuid.uuid4().hex[:10]}"
+
+    try:
+        inv_id, prop1_id, _ = _setup_competing_partial_proposals(
+            pg_db, tenant_id, inv_total=10000, pay1_amount=5000, pay2_amount=5000
+        )
+
+        idempotency_key = f"idemp-key-{tenant_id}"
+        results = []
+        errors = []
+
+        def attempt_idempotent_approval(actor: str):
+            with pg_db.session() as session:
+                svc = ApprovalService(session)
+                try:
+                    res = svc.approve_proposal(
+                        tenant_id=tenant_id,
+                        proposal_id=prop1_id,
+                        actor=actor,
+                        idempotency_key=idempotency_key,
+                    )
+                    results.append(res)
+                except Exception as e:
+                    errors.append((type(e).__name__, str(e)))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            f1 = executor.submit(attempt_idempotent_approval, "idemp_actor_1")
+            f2 = executor.submit(attempt_idempotent_approval, "idemp_actor_2")
+            concurrent.futures.wait([f1, f2])
+
+        # Exactly 1 initial approval succeeds, competing call is either serialized idempotent replay or rejected duplicate
+        with pg_db.session() as session:
+            inv_repo = InvoiceRepository(session)
+            alloc_repo = AllocationRepository(session)
+            audit_repo = AuditRepository(session)
+
+            rem = inv_repo.get_ledger_outstanding_minor(tenant_id, inv_id)
+            assert rem == 5000, f"Expected 5000 cents remaining capacity, got {rem}"
+
+            allocs = alloc_repo.get_all_allocations(tenant_id)
+            assert len(allocs) == 1, f"Expected exactly 1 allocation record, found {len(allocs)}"
+            assert allocs[0].amount_minor == 5000
+
+            # Subsequent sequential replay with same key must succeed idempotently
+            svc = ApprovalService(session)
+            replay_res = svc.approve_proposal(
+                tenant_id=tenant_id,
+                proposal_id=prop1_id,
+                actor="replay_operator",
+                idempotency_key=idempotency_key,
+            )
+            assert replay_res.status == "APPROVED"
+            assert replay_res.is_idempotent_replay is True
+            assert replay_res.allocation_ids == (allocs[0].id,)
+
+            # Outstanding capacity must still remain 5000 (not double deducted)
+            rem_after_replay = inv_repo.get_ledger_outstanding_minor(tenant_id, inv_id)
+            assert rem_after_replay == 5000
+
+            allocs_after_replay = alloc_repo.get_all_allocations(tenant_id)
+            assert len(allocs_after_replay) == 1
+
+            audit_repo.verify_tenant_chain(tenant_id)
+    finally:
+        _cleanup_tenant(pg_db, tenant_id)
+        pg_db.dispose()

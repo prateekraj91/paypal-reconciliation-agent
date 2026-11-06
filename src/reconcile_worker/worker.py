@@ -14,7 +14,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from reconcile.models import Payment, PaymentStatus
+from reconcile.models import Payment, PaymentReversal, PaymentStatus, Refund
 from reconcile.money import parse_money_to_minor_units
 from reconcile.paypal import (
     PayPalAPIError,
@@ -448,7 +448,136 @@ class Worker:
             workflow.run_reconciliation(tenant_id=tenant_id)
             return
 
-        # 3. Safely handle other known non-reconciliation PayPal events
+        # 3. Involuntary Processor Reversals (PAYMENT.CAPTURE.REVERSED)
+        if event_type == "PAYMENT.CAPTURE.REVERSED":
+            capture_id = resource.get("id")
+            if not capture_id:
+                raise PermanentJobError(f"No resource ID found in event '{event_type}'")
+
+            amount_dict = resource.get("amount") or {}
+            value_str = amount_dict.get("value", "0.00")
+            currency = amount_dict.get("currency_code", "USD")
+            amount_cents = parse_money_to_minor_units(value_str, currency)
+
+            custom_id = resource.get("custom_id") or resource.get("invoice_id")
+            rev_time = resource.get("create_time") or resource.get("update_time") or _utcnow().isoformat()
+            rev_id = (
+                f"rev_{capture_id}_{resource.get('update_time', '')}"
+                if resource.get("update_time")
+                else f"rev_{capture_id}"
+            )
+
+            reversal = PaymentReversal(
+                reversal_id=rev_id,
+                parent_payment_id=capture_id,
+                amount_cents=amount_cents,
+                currency=currency,
+                reversed_at=datetime.fromisoformat(rev_time.replace("Z", "+00:00")),
+                reason=resource.get("reason_code") or "Involuntary processor reversal / chargeback",
+                dispute_id=resource.get("dispute_id"),
+                invoice_id=custom_id,
+            )
+            workflow.ingest_reversals(
+                tenant_id=tenant_id,
+                reversals=[reversal],
+                raw_payloads={reversal.reversal_id: resource},
+            )
+            workflow.run_reconciliation(tenant_id=tenant_id)
+            return
+
+        # 4. Dispute Resolution (CUSTOMER.DISPUTE.RESOLVED)
+        if event_type == "CUSTOMER.DISPUTE.RESOLVED":
+            dispute_id = resource.get("dispute_id") or resource.get("id")
+            if not dispute_id:
+                raise PermanentJobError(f"No dispute ID found in event '{event_type}'")
+
+            outcome = resource.get("dispute_outcome") or {}
+            outcome_code = (outcome.get("outcome_code") or "").upper()
+
+            # Confirm a dispute resolution changes financial balances only when authoritative outcome data supports that change
+            if outcome_code in ("RESOLVED_BUYER_FAVOUR", "RESOLVED_WITH_PAYOUT"):
+                amt_dict = outcome.get("amount") or resource.get("dispute_amount") or {}
+                val_str = amt_dict.get("value", "0.00")
+                curr = amt_dict.get("currency_code", "USD")
+                reversal_cents = parse_money_to_minor_units(val_str, curr)
+
+                disputed_txns = resource.get("disputed_transactions") or []
+                parent_txn_id = ""
+                if disputed_txns:
+                    parent_txn_id = (
+                        disputed_txns[0].get("seller_transaction_id")
+                        or disputed_txns[0].get("buyer_transaction_id")
+                        or ""
+                    )
+
+                if reversal_cents > 0 and parent_txn_id:
+                    rev_time = resource.get("update_time") or resource.get("create_time") or _utcnow().isoformat()
+                    reversal = PaymentReversal(
+                        reversal_id=f"rev_dispute_{dispute_id}",
+                        parent_payment_id=parent_txn_id,
+                        amount_cents=reversal_cents,
+                        currency=curr,
+                        reversed_at=datetime.fromisoformat(rev_time.replace("Z", "+00:00")),
+                        reason=f"Dispute resolved in buyer favour: {outcome_code}",
+                        dispute_id=dispute_id,
+                    )
+                    workflow.ingest_reversals(
+                        tenant_id=tenant_id,
+                        reversals=[reversal],
+                        raw_payloads={reversal.reversal_id: resource},
+                    )
+                    workflow.run_reconciliation(tenant_id=tenant_id)
+                    return
+                else:
+                    logger.warning(
+                        "Dispute %s resolved with outcome '%s' but lacked authoritative amount or transaction ID; financial balances unchanged.",
+                        dispute_id,
+                        outcome_code,
+                    )
+            else:
+                logger.info(
+                    "Dispute %s resolved with outcome code '%s'; financial balances unchanged.",
+                    dispute_id,
+                    outcome_code,
+                )
+            return
+
+        # 5. Merchant Refunds (PAYMENT.CAPTURE.REFUNDED)
+        if event_type in ("PAYMENT.CAPTURE.REFUNDED", "PAYMENT.SALE.REFUNDED"):
+            refund_id = resource.get("id")
+            if not refund_id:
+                raise PermanentJobError(f"No resource ID found in event '{event_type}'")
+
+            capture_id = resource.get("capture_id") or resource.get("parent_payment")
+            if not capture_id:
+                raise PermanentJobError(f"No parent capture ID found in refund event '{event_type}'")
+
+            amount_dict = resource.get("amount") or {}
+            value_str = amount_dict.get("value", "0.00")
+            currency = amount_dict.get("currency_code", "USD")
+            amount_cents = parse_money_to_minor_units(value_str, currency)
+
+            custom_id = resource.get("custom_id") or resource.get("invoice_id")
+            ref_time = resource.get("create_time") or resource.get("update_time") or _utcnow().isoformat()
+
+            refund = Refund(
+                refund_id=refund_id,
+                parent_payment_id=capture_id,
+                amount_cents=amount_cents,
+                currency=currency,
+                refunded_at=datetime.fromisoformat(ref_time.replace("Z", "+00:00")),
+                reason=resource.get("note_to_payer") or "Merchant-initiated refund",
+                invoice_id=custom_id,
+            )
+            workflow.ingest_refunds(
+                tenant_id=tenant_id,
+                refunds=[refund],
+                raw_payloads={refund.refund_id: resource},
+            )
+            workflow.run_reconciliation(tenant_id=tenant_id)
+            return
+
+        # 6. Safely handle other known non-reconciliation PayPal events
         logger.info("Safely acknowledged non-reconciliation event type: %s", event_type)
         return
 
