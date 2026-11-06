@@ -189,6 +189,22 @@ class ConnectionProvisionRequest(BaseModel):
         return ConnectionRepository.validate_credential_reference(v)
 
 
+class InvestigationCreateRequest(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="Existing tenant ID")
+    target_type: str = Field(..., description="Target type: 'payment', 'proposal', 'invoice'")
+    target_id: str = Field(..., description="Target identifier (e.g. payment ID or invoice number)")
+    sync_mode: Optional[bool] = Field(default=False, description="Whether to execute synchronously")
+
+    @field_validator("target_type")
+    @classmethod
+    def validate_target_type(cls, v: str) -> str:
+        clean = v.strip().lower()
+        if clean not in ("payment", "proposal", "invoice", "refund", "reversal"):
+            raise ValueError(f"Invalid target_type '{v}'. Must be one of: payment, proposal, invoice, refund, reversal")
+        return clean
+
+
+
 
 # --------------------------------------------------------------------------
 # Health and Readiness Endpoints
@@ -689,4 +705,144 @@ def list_jobs(
             }
             for j in jobs
         ]
+    }
+
+
+# --------------------------------------------------------------------------
+# AI Exception Investigation Endpoints
+# --------------------------------------------------------------------------
+
+
+@app.post("/admin/investigations", status_code=status.HTTP_202_ACCEPTED)
+def submit_investigation(
+    request: InvestigationCreateRequest,
+    response: Response,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Submit an investigation request for an unresolved financial discrepancy."""
+    config = APIConfig.from_env()
+    tenant_id = request.tenant_id or config.default_tenant_id
+
+    tenant_repo = TenantRepository(session)
+    if not tenant_repo.get_tenant(tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tenant '{tenant_id}' not found.",
+        )
+
+    from reconcile_investigator.service import InvestigationService
+    service = InvestigationService(session)
+
+    if request.sync_mode:
+        inv_rec, result, ver_res = service.run_investigation(
+            tenant_id=tenant_id,
+            target_type=request.target_type,
+            target_id=request.target_id,
+        )
+        response.status_code = status.HTTP_200_OK
+        return {
+            "status": inv_rec.status,
+            "investigation_id": inv_rec.id,
+            "classification": inv_rec.classification,
+            "summary": inv_rec.summary,
+            "verifier_status": inv_rec.verifier_status,
+            "requires_human_review": result.requires_human_review,
+            "result": inv_rec.result,
+        }
+    else:
+        inv_rec, job = service.enqueue_investigation(
+            tenant_id=tenant_id,
+            target_type=request.target_type,
+            target_id=request.target_id,
+        )
+        return {
+            "status": "queued",
+            "investigation_id": inv_rec.id,
+            "job_id": job.id,
+            "target_type": request.target_type,
+            "target_id": request.target_id,
+        }
+
+
+@app.get("/admin/investigations", status_code=status.HTTP_200_OK)
+def list_investigations(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    target_type: Optional[str] = None,
+    limit: int = 50,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """List investigation cases for the authorized tenant."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    from reconcile_store.repositories.investigation_repo import InvestigationRepository
+    repo = InvestigationRepository(session)
+    investigations = repo.list_investigations(
+        tenant_id=effective_tenant,
+        status=status,
+        target_type=target_type,
+        limit=limit,
+    )
+
+    return {
+        "investigations": [
+            {
+                "id": inv.id,
+                "tenant_id": inv.tenant_id,
+                "target_type": inv.target_type,
+                "target_id": inv.target_id,
+                "status": inv.status,
+                "classification": inv.classification,
+                "summary": inv.summary,
+                "verifier_status": inv.verifier_status,
+                "model_provider": inv.model_provider,
+                "created_at": inv.created_at.isoformat() if inv.created_at else None,
+                "completed_at": inv.completed_at.isoformat() if inv.completed_at else None,
+            }
+            for inv in investigations
+        ]
+    }
+
+
+@app.get("/admin/investigations/{investigation_id}", status_code=status.HTTP_200_OK)
+def get_investigation(
+    investigation_id: str,
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve full status, findings, and verifier report for an investigation."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    from reconcile_store.repositories.investigation_repo import InvestigationRepository
+    repo = InvestigationRepository(session)
+    inv = repo.get_investigation(effective_tenant, investigation_id)
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    return {
+        "id": inv.id,
+        "tenant_id": inv.tenant_id,
+        "target_type": inv.target_type,
+        "target_id": inv.target_id,
+        "status": inv.status,
+        "classification": inv.classification,
+        "summary": inv.summary,
+        "result": inv.result,
+        "evidence_references": inv.evidence_references,
+        "verifier_status": inv.verifier_status,
+        "verifier_details": inv.verifier_details,
+        "model_provider": inv.model_provider,
+        "model_name": inv.model_name,
+        "prompt_version": inv.prompt_version,
+        "error_message": inv.error_message,
+        "created_at": inv.created_at.isoformat() if inv.created_at else None,
+        "completed_at": inv.completed_at.isoformat() if inv.completed_at else None,
     }
