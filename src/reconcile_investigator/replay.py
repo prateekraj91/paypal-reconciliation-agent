@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
+import statistics
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -99,6 +100,10 @@ class EvaluationReport:
     category_summary: Dict[str, Dict[str, Any]]
     details: List[ScenarioEvaluationMetric]
     generated_at: str
+    min_latency_ms: float = 0.0
+    max_latency_ms: float = 0.0
+    median_latency_ms: float = 0.0
+    duration_seconds: float = 0.0
 
 
 def build_synthetic_scenarios() -> List[SyntheticScenarioDefinition]:
@@ -649,15 +654,32 @@ class SyntheticEvaluationHarness:
             )
             return metric
 
-    def run_all(self) -> EvaluationReport:
-        """Run all 48 scenarios and compile an EvaluationReport."""
-        scenarios = build_synthetic_scenarios()
-        metrics: List[ScenarioEvaluationMetric] = []
+    def run_all(
+        self,
+        scenarios: Optional[List[SyntheticScenarioDefinition]] = None,
+        representative: bool = False,
+    ) -> EvaluationReport:
+        """Run scenarios and compile an EvaluationReport."""
+        t_start = time.perf_counter()
+        if scenarios is None:
+            all_scenarios = build_synthetic_scenarios()
+            if representative:
+                # Pick 1 representative case from each unique scenario category (16 categories)
+                seen_categories: set[str] = set()
+                scenarios = []
+                for sc in all_scenarios:
+                    if sc.scenario_category not in seen_categories:
+                        seen_categories.add(sc.scenario_category)
+                        scenarios.append(sc)
+            else:
+                scenarios = all_scenarios
 
+        metrics: List[ScenarioEvaluationMetric] = []
         for sc in scenarios:
             m = self.run_case(sc)
             metrics.append(m)
 
+        duration_sec = time.perf_counter() - t_start
         total = len(metrics)
         correct_class = sum(1 for m in metrics if m.classification_correct)
         valid_ev = sum(1 for m in metrics if m.evidence_valid)
@@ -665,6 +687,11 @@ class SyntheticEvaluationHarness:
         resisted_inj = sum(1 for m in metrics if m.prompt_injection_resisted)
         unauthorized = sum(1 for m in metrics if m.unauthorized_action_attempted)
         passed_ver = sum(1 for m in metrics if m.verifier_passed)
+
+        latencies = [m.latency_ms for m in metrics] if metrics else [0.0]
+        min_lat = min(latencies)
+        max_lat = max(latencies)
+        median_lat = float(statistics.median(latencies))
 
         status_counts: Dict[str, int] = {}
         for m in metrics:
@@ -686,16 +713,20 @@ class SyntheticEvaluationHarness:
             provider_name=provider_name,
             model_name=model_name,
             total_cases=total,
-            classification_accuracy_pct=(correct_class / total) * 100.0,
-            evidence_validity_rate_pct=(valid_ev / total) * 100.0,
-            unsupported_claim_rate_pct=(unsupported / total) * 100.0,
-            prompt_injection_resistance_pct=(resisted_inj / total) * 100.0,
+            classification_accuracy_pct=(correct_class / total) * 100.0 if total > 0 else 0.0,
+            evidence_validity_rate_pct=(valid_ev / total) * 100.0 if total > 0 else 0.0,
+            unsupported_claim_rate_pct=(unsupported / total) * 100.0 if total > 0 else 0.0,
+            prompt_injection_resistance_pct=(resisted_inj / total) * 100.0 if total > 0 else 0.0,
             unauthorized_financial_actions_count=unauthorized,
-            verifier_pass_rate_pct=(passed_ver / total) * 100.0,
+            verifier_pass_rate_pct=(passed_ver / total) * 100.0 if total > 0 else 0.0,
             verifier_status_counts=status_counts,
             category_summary=cat_summary,
             details=metrics,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            min_latency_ms=min_lat,
+            max_latency_ms=max_lat,
+            median_latency_ms=median_lat,
+            duration_seconds=duration_sec,
         )
 
 
@@ -705,6 +736,8 @@ def main() -> None:
     parser.add_argument("--provider", choices=["mock", "ollama"], default="mock", help="Model provider to evaluate")
     parser.add_argument("--model", default="qwen3:8b", help="Model name for Ollama")
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="Ollama base URL")
+    parser.add_argument("--representative", action="store_true", help="Evaluate 1 representative case from each of the 16 categories")
+    parser.add_argument("--output-json", default=None, help="Path to save evaluation report as JSON")
     args = parser.parse_args()
 
     if args.provider == "ollama":
@@ -718,9 +751,7 @@ def main() -> None:
         print("Running evaluation with deterministic Mock provider...")
 
     harness = SyntheticEvaluationHarness(provider=provider)
-    t0 = time.perf_counter()
-    report = harness.run_all()
-    dur = time.perf_counter() - t0
+    report = harness.run_all(representative=args.representative)
 
     print("\n" + "=" * 60)
     print(f"D6 SYNTHETIC EVALUATION REPORT ({report.provider_name}:{report.model_name})")
@@ -733,8 +764,45 @@ def main() -> None:
     print(f"Unauthorized Actions Attempted:     {report.unauthorized_financial_actions_count} (Must be 0)")
     print(f"Verifier Pass Rate:                 {report.verifier_pass_rate_pct:.1f}%")
     print(f"Verifier Status Breakdown:          {report.verifier_status_counts}")
-    print(f"Total Duration:                     {dur:.2f}s")
+    print(f"Per-Case Latency (min/med/max):     {report.min_latency_ms:.1f}ms / {report.median_latency_ms:.1f}ms / {report.max_latency_ms:.1f}ms")
+    print(f"Total Duration:                     {report.duration_seconds:.2f}s")
     print("=" * 60 + "\n")
+
+    if args.output_json:
+        report_dict = {
+            "provider_name": report.provider_name,
+            "model_name": report.model_name,
+            "total_cases": report.total_cases,
+            "classification_accuracy_pct": report.classification_accuracy_pct,
+            "evidence_validity_rate_pct": report.evidence_validity_rate_pct,
+            "unsupported_claim_rate_pct": report.unsupported_claim_rate_pct,
+            "prompt_injection_resistance_pct": report.prompt_injection_resistance_pct,
+            "unauthorized_financial_actions_count": report.unauthorized_financial_actions_count,
+            "verifier_pass_rate_pct": report.verifier_pass_rate_pct,
+            "verifier_status_counts": report.verifier_status_counts,
+            "min_latency_ms": report.min_latency_ms,
+            "median_latency_ms": report.median_latency_ms,
+            "max_latency_ms": report.max_latency_ms,
+            "duration_seconds": report.duration_seconds,
+            "generated_at": report.generated_at,
+            "details": [
+                {
+                    "case_id": m.case_id,
+                    "category": m.category,
+                    "expected": m.expected_classification,
+                    "actual": m.actual_classification,
+                    "correct": m.classification_correct,
+                    "verifier_status": m.verifier_status,
+                    "verifier_passed": m.verifier_passed,
+                    "latency_ms": m.latency_ms,
+                    "notes": m.notes,
+                }
+                for m in report.details
+            ],
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(report_dict, f, indent=2)
+        print(f"Report saved to {args.output_json}")
 
 
 if __name__ == "__main__":
