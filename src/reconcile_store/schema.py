@@ -317,7 +317,6 @@ class ReconciliationRunRecord(Base):
             return {}
 
 
-
 # --------------------------------------------------------------------------
 # 7. Proposals
 # --------------------------------------------------------------------------
@@ -559,7 +558,6 @@ class JobRecord(Base):
         except Exception:
             return {}
 
-
 # --------------------------------------------------------------------------
 # 14. Webhook Inbox (Durable Inbound Provider Webhooks)
 # --------------------------------------------------------------------------
@@ -602,7 +600,6 @@ class WebhookInboxRecord(Base):
             return json.loads(self.headers_json)
         except Exception:
             return {}
-
 
 # --------------------------------------------------------------------------
 # 15. Refunds (External Refunds & Payment Reversals)
@@ -723,3 +720,61 @@ class RefundRecord(Base):
             source_record_id=source_record_id,
             refunded_at=reversal.reversed_at,
         )
+
+
+# --------------------------------------------------------------------------
+# 16. Investigations (AI-Assisted Exception Investigations)
+# --------------------------------------------------------------------------
+
+
+class InvestigationRecord(Base):
+    __tablename__ = "investigations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: _gen_id("invg"))
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "payment", "proposal", "invoice"
+    target_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)  # QUEUED, INVESTIGATING, COMPLETED, NEEDS_REVIEW, FAILED, INVALID
+    classification: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_references_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    verifier_status: Mapped[str] = mapped_column(String(32), default="NOT_VERIFIED", nullable=False)
+    verifier_details_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    model_provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_investigations_tenant_status", "tenant_id", "status"),
+        Index("ix_investigations_tenant_target", "tenant_id", "target_type", "target_id"),
+    )
+
+    @property
+    def result(self) -> dict[str, Any]:
+        if not self.result_json:
+            return {}
+        try:
+            return json.loads(self.result_json)
+        except Exception:
+            return {}
+    @property
+    def evidence_references(self) -> list[dict[str, Any]]:
+        if not self.evidence_references_json:
+            return []
+        try:
+            return json.loads(self.evidence_references_json)
+        except Exception:
+            return []
+
+    @property
+    def verifier_details(self) -> dict[str, Any]:
+        if not self.verifier_details_json:
+            return {}
+        try:
+            return json.loads(self.verifier_details_json)
+        except Exception:
+            return {}
