@@ -89,8 +89,26 @@ export function InvestigationDetailPage({
   const riskFlags = result.risk_flags || [];
   const verifierNotes = result.verifier_notes || inv.verifier_details?.notes || [];
 
-  const isInvalid = inv.verifier_status === 'INVALID';
-  const isResolved = inv.status === 'COMPLETED' || inv.status === 'REJECTED';
+  const isVerifierApproved = inv.verifier_status === 'VERIFIED';
+  const isInvalid = !isVerifierApproved;
+  const isResolved = inv.status === 'APPROVED' || inv.status === 'REJECTED';
+
+  // Compute allocation distribution for display
+  const allocDistribution: Array<{ invoiceId: string; amountMinor: number; currency: string }> = [];
+  if (suggestedResolution) {
+    const allocMap = suggestedResolution.suggested_allocations;
+    const invIds = suggestedResolution.suggested_invoice_ids || [];
+    const totalMinor = suggestedResolution.suggested_amount_cents || 0;
+    const curr = inv.evidence_references?.[0]?.currency || 'USD';
+
+    if (allocMap && Object.keys(allocMap).length > 0) {
+      Object.entries(allocMap).forEach(([id, amt]) => {
+        allocDistribution.push({ invoiceId: id, amountMinor: amt, currency: curr });
+      });
+    } else if (invIds.length > 0 && totalMinor > 0) {
+      allocDistribution.push({ invoiceId: invIds[0], amountMinor: totalMinor, currency: curr });
+    }
+  }
 
   const handleApprove = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -454,15 +472,58 @@ export function InvestigationDetailPage({
         onClose={() => setIsApproveOpen(false)}
         title="Authorize Investigation Resolution"
         subtitle={`Case ID: ${inv.id}`}
+        maxWidth="max-w-2xl"
       >
         <form onSubmit={handleApprove} className="space-y-4">
-          <div className="p-3.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-xs text-emerald-300 leading-relaxed">
-            Approving this investigation will authoritatively resolve the exception and execute the suggested ledger allocation via ApprovalService.
+          <div className="p-3 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-xs text-emerald-300 leading-relaxed">
+            Approving this investigation links to the verified deterministic proposal and executes the 10-step atomic allocation via <strong>ApprovalService</strong>.
+          </div>
+
+          {/* Allocation Distribution Table */}
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center justify-between">
+              <span>Proposed Allocation Distribution</span>
+              <span className="font-mono text-emerald-400">
+                Target: {inv.target_type}:{inv.target_id}
+              </span>
+            </div>
+
+            {allocDistribution.length > 0 ? (
+              <table className="w-full text-xs font-mono text-left">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-1.5 font-medium">Target Invoice</th>
+                    <th className="py-1.5 font-medium">Allocation Amount</th>
+                    <th className="py-1.5 font-medium text-right">Currency</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {allocDistribution.map((a, idx) => (
+                    <tr key={idx} className="text-slate-200">
+                      <td className="py-2">{a.invoiceId}</td>
+                      <td className="py-2 text-emerald-400">
+                        <MoneyDisplay amountMinor={a.amountMinor} currency={a.currency} />
+                      </td>
+                      <td className="py-2 text-right text-slate-400">{a.currency}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="text-xs text-rose-400">
+                Warning: No structured allocations detected in the recommendation.
+              </div>
+            )}
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">
-              Approving Operator Email <span className="text-red-400">*</span>
+            <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center justify-between">
+              <span>
+                Approving Operator Identity <span className="text-red-400">*</span>
+              </span>
+              <span className="text-[10px] text-slate-500 font-normal">
+                Self-reported for local demo audit
+              </span>
             </label>
             <input
               type="text"
@@ -470,7 +531,11 @@ export function InvestigationDetailPage({
               value={reviewer}
               onChange={(e) => setReviewer(e.target.value)}
               className="input-text text-xs"
+              placeholder="e.g. controller.sarah@demo.com"
             />
+            <p className="text-[11px] text-slate-500 mt-1">
+              Local Operator Notice: Operator identity is recorded in the SHA-256 audit log for local accountability and does not represent authenticated multi-user RBAC.
+            </p>
           </div>
 
           <div>
@@ -482,6 +547,7 @@ export function InvestigationDetailPage({
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               className="input-text text-xs resize-none"
+              placeholder="Audit justification for operator decision..."
             />
           </div>
 
@@ -491,7 +557,7 @@ export function InvestigationDetailPage({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !reviewer.trim()}
+              disabled={isSubmitting || !reviewer.trim() || !isVerifierApproved}
               className="btn btn-success text-xs font-semibold px-4"
             >
               {isSubmitting ? 'Executing Allocation Transaction...' : 'Confirm & Authorize'}

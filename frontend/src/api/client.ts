@@ -17,11 +17,11 @@ import {
 } from '../types/api';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-const DEFAULT_API_KEY = 'test-secret-key-12345';
 
 class ApiClient {
   private tenantId: string = 'demo_merchant';
-  private apiKey: string = DEFAULT_API_KEY;
+  private apiKey: string = '';
+  private onUnauthorizedCallback?: () => void;
 
   public setTenantId(tenantId: string) {
     this.tenantId = tenantId;
@@ -32,10 +32,28 @@ class ApiClient {
   }
 
   public setApiKey(key: string) {
-    this.apiKey = key;
+    this.apiKey = key.trim();
+  }
+
+  public clearApiKey() {
+    this.apiKey = '';
+  }
+
+  public hasApiKey(): boolean {
+    return Boolean(this.apiKey && this.apiKey.length > 0);
+  }
+
+  public onUnauthorized(callback: () => void) {
+    this.onUnauthorizedCallback = callback;
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    if (!this.hasApiKey()) {
+      throw new Error(
+        'Authentication required: No operator admin credential configured. Please sign in.'
+      );
+    }
+
     const url = `${API_BASE_URL}${endpoint}`;
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${this.apiKey}`);
@@ -47,6 +65,15 @@ class ApiClient {
       ...options,
       headers,
     });
+
+    if (response.status === 401) {
+      if (this.onUnauthorizedCallback) {
+        this.onUnauthorizedCallback();
+      }
+      throw new Error(
+        'Authentication failed (401 Unauthorized): Invalid or expired admin bearer credential.'
+      );
+    }
 
     if (!response.ok) {
       let errorMsg = `HTTP Error ${response.status} ${response.statusText}`;
@@ -275,9 +302,14 @@ class ApiClient {
     });
   }
 
-  // Health / Readiness
+  // Health / Readiness (Public endpoint)
   public async checkHealth(): Promise<{ status: string; service: string }> {
-    return this.request(`/health`);
+    const url = `${API_BASE_URL}/health`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Health check failed with status ${response.status}`);
+    }
+    return response.json();
   }
 }
 

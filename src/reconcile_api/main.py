@@ -247,21 +247,49 @@ class InvestigationCreateRequest(BaseModel):
 
 
 class ProposalApproveRequest(BaseModel):
-    reviewer: str = Field(..., min_length=1, max_length=255, description="Name or identifier of operator approving proposal")
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=1000, description="Optional notes or audit context")
     tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
 
 
 class ProposalRejectRequest(BaseModel):
-    reviewer: str = Field(..., min_length=1, max_length=255, description="Name or identifier of operator rejecting proposal")
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
     reason: str = Field(..., min_length=1, max_length=1000, description="Mandatory reason for proposal rejection")
     tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
 
 
 class InvestigationDecisionRequest(BaseModel):
-    reviewer: str = Field(..., min_length=1, max_length=255, description="Name or identifier of operator making decision")
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=1000, description="Optional notes or explanation")
     tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
+    proposal_id: Optional[str] = Field(default=None, description="Optional explicit proposal ID to link and approve")
 
 
 class RunTriggerRequest(BaseModel):
@@ -1820,8 +1848,26 @@ def approve_investigation(
     """Approve an investigation recommendation.
 
     NON-NEGOTIABLE FINANCIAL SAFETY INVARIANTS:
-    1. If verifier_status == "INVALID", approval is STRICTLY BLOCKED (fail-closed).
-    2. Any financial allocation mutation MUST proceed through ApprovalService with full verification.
+    1. Investigation Eligibility:
+       - Reject if already resolved (APPROVED or REJECTED).
+       - Must be in completed human-review state ('NEEDS_REVIEW' or 'COMPLETED').
+       - Independent safety verifier status must explicitly be 'VERIFIED'.
+         INVALID, UNVERIFIED, NEEDS_REVIEW, or missing statuses are strictly rejected (fail-closed).
+    2. Proposal Linkage:
+       - Prefer approving an existing deterministic proposal explicitly linked to the target payment.
+       - Proposal must still be pending.
+       - Proposal must belong to the payment being investigated.
+       - Proposal allocations must match the recommended allocation distribution.
+       - Never synthesize financial evidence or fabricate synthetic proposals with fake evidence.
+       - If no existing deterministic proposal matches, keep as recommendation requiring further review.
+    3. Allocation Correctness:
+       - Never fall back to full payment amount when suggested_amount_cents is absent or zero.
+       - Reject missing, zero, or negative allocation amounts.
+       - Respect complete suggested_allocations mapping for split payments.
+       - Validate sum of allocation amounts <= payment amount and <= unapplied cash.
+       - Validate each target invoice independently for eligibility, currency match, and capacity.
+    4. Human Approval Execution:
+       - All financial mutations MUST proceed through ApprovalService within an atomic transaction.
     """
     config = APIConfig.from_env()
     effective_tenant = request.tenant_id or config.default_tenant_id
@@ -1834,102 +1880,253 @@ def approve_investigation(
             detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
         )
 
-    # Invariant 1: Fail-closed on INVALID verifier status
-    if inv.verifier_status == "INVALID":
+    # 1. Eligibility Checks (Requirement 2A)
+    # Check independent verifier status: strictly VERIFIED (fail-closed)
+    norm_verifier_status = (inv.verifier_status or "").upper()
+    if norm_verifier_status == "INVALID":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 "Cannot approve investigation: Independent safety verifier status is 'INVALID'. "
-                "Financial mutation is strictly blocked."
+                "Financial mutation is strictly blocked (fail-closed)."
+            ),
+        )
+    if norm_verifier_status != "VERIFIED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status or 'MISSING'}'. "
+                "Only explicitly 'VERIFIED' investigations are eligible for operator approval (fail-closed)."
             ),
         )
 
+    if inv.status in ("APPROVED", "REJECTED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation '{investigation_id}': Already resolved with status '{inv.status}'.",
+        )
+
+    if inv.status not in ("NEEDS_REVIEW", "COMPLETED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation '{investigation_id}': Incomplete or ineligible status '{inv.status}'. "
+                "Only investigations in 'NEEDS_REVIEW' or 'COMPLETED' state can be reviewed and approved."
+            ),
+        )
+
+    # 2. Extract and Validate Suggested Resolution (Requirement 2C)
     result_dict = inv.result or {}
     suggested_res = result_dict.get("suggested_resolution")
-
-    allocation_ids: list[str] = []
-    if suggested_res and suggested_res.get("suggested_invoice_ids"):
-        prop_repo = ProposalRepository(session)
-        approval_service = ApprovalService(session)
-
-        stmt_pay = select(PaymentRecord).where(
-            PaymentRecord.tenant_id == effective_tenant,
-            or_(
-                PaymentRecord.id == inv.target_id,
-                PaymentRecord.provider_payment_id == inv.target_id,
-            ),
+    if not suggested_res:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: No suggested resolution is present in the investigation result.",
         )
-        pay = session.scalars(stmt_pay).first()
-        if not pay:
+
+    res_type = suggested_res.get("resolution_type")
+    if res_type != "ALLOCATE_PAYMENT":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Suggested resolution type '{res_type}' cannot be approved as an allocation.",
+        )
+
+    # Resolve target payment
+    stmt_pay = select(PaymentRecord).where(
+        PaymentRecord.tenant_id == effective_tenant,
+        or_(
+            PaymentRecord.id == inv.target_id,
+            PaymentRecord.provider_payment_id == inv.target_id,
+        ),
+    )
+    pay = session.scalars(stmt_pay).first()
+    if not pay:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Investigation target payment '{inv.target_id}' could not be resolved in ledger.",
+        )
+
+    norm_pay_status = (pay.status or "").upper()
+    if norm_pay_status not in {"COMPLETED", "SUCCESS", "S"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment status '{pay.status}' is not eligible for allocation (must be COMPLETED).",
+        )
+
+    # Validate suggested allocation amounts - never fall back to full payment amount!
+    alloc_map = suggested_res.get("suggested_allocations")
+    suggested_amt = suggested_res.get("suggested_amount_cents")
+    suggested_invoices = suggested_res.get("suggested_invoice_ids") or []
+
+    if alloc_map and isinstance(alloc_map, dict) and len(alloc_map) > 0:
+        raw_allocs = dict(alloc_map)
+    elif len(suggested_invoices) == 1:
+        if suggested_amt is None or suggested_amt <= 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Investigation target payment '{inv.target_id}' could not be resolved in ledger.",
-            )
-
-        existing_props = prop_repo.list_by_payment(effective_tenant, pay.id)
-        target_prop = None
-        for p in existing_props:
-            if p.outcome == "PROPOSED":
-                decs = p.decisions
-                if not decs or decs[-1].decision_type == "PENDING":
-                    target_prop = p
-                    break
-
-        if not target_prop:
-            target_inv_id = suggested_res["suggested_invoice_ids"][0]
-            stmt_inv = select(InvoiceRecord).where(
-                InvoiceRecord.tenant_id == effective_tenant,
-                or_(
-                    InvoiceRecord.id == target_inv_id,
-                    InvoiceRecord.provider_invoice_id == target_inv_id,
-                    InvoiceRecord.invoice_number == target_inv_id,
+                detail=(
+                    "Missing or invalid suggested allocation amount: suggested_amount_cents must be a positive integer. "
+                    "Falling back to payment amount is strictly prohibited."
                 ),
             )
-            inv_rec = session.scalars(stmt_inv).first()
-            if not inv_rec:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Suggested invoice '{target_inv_id}' could not be resolved in ledger.",
-                )
+        raw_allocs = {suggested_invoices[0]: suggested_amt}
+    elif len(suggested_invoices) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Split recommendation across multiple invoices requires an explicit suggested_allocations mapping per invoice.",
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Suggested resolution specifies no target invoices.",
+        )
 
-            run_repo = ReconciliationRunRepository(session)
-            runs = list(run_repo.list_runs(effective_tenant))
-            run_id = runs[0].id if runs else "run_manual_operator"
-
-            alloc_amount = suggested_res.get("suggested_amount_cents") or pay.amount_minor
-            target_prop = prop_repo.create_proposal(
-                tenant_id=effective_tenant,
-                run_id=run_id,
-                payment_id=pay.id,
-                outcome="PROPOSED",
-                evidence=["REFERENCE_MATCH", "AMOUNT_EXACT"],
-                allocations=[
-                    {
-                        "invoice_id": inv_rec.id,
-                        "amount_minor": alloc_amount,
-                        "currency": pay.currency,
-                        "evidence": ["REFERENCE_MATCH", "AMOUNT_EXACT"],
-                    }
-                ],
-            )
-
-        idempotency_key = f"invg-approval:{effective_tenant}:{investigation_id}:{request.reviewer}"
-        try:
-            approval_res = approval_service.approve_proposal(
-                tenant_id=effective_tenant,
-                proposal_id=target_prop.id,
-                actor=request.reviewer,
-                idempotency_key=idempotency_key,
-                reason=request.notes or f"Approved via Investigation {investigation_id}",
-            )
-            allocation_ids = list(approval_res.allocation_ids)
-        except Exception as exc:
+    # Validate each individual allocation amount
+    for inv_key, amt in raw_allocs.items():
+        if not isinstance(amt, int) or amt <= 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to execute approved allocation: {exc}",
-            ) from exc
+                detail=f"Invalid allocation amount {amt} for invoice '{inv_key}': must be a positive integer.",
+            )
 
-    invg_repo.update_status(effective_tenant, investigation_id, "COMPLETED")
+    total_alloc_minor = sum(raw_allocs.values())
+    if total_alloc_minor <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Total suggested allocation amount must be greater than zero.",
+        )
+    if total_alloc_minor > pay.amount_minor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sum of suggested allocations ({total_alloc_minor}) exceeds payment total ({pay.amount_minor}).",
+        )
+
+    pay_repo = PaymentRepository(session)
+    unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, pay.id)
+    if total_alloc_minor > unapplied:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sum of suggested allocations ({total_alloc_minor}) exceeds payment unapplied cash ({unapplied}).",
+        )
+
+    # Resolve invoices and check capacity / currency independently
+    inv_repo = InvoiceRepository(session)
+    resolved_allocations: dict[str, int] = {}
+    for inv_key, amt in raw_allocs.items():
+        stmt_inv = select(InvoiceRecord).where(
+            InvoiceRecord.tenant_id == effective_tenant,
+            or_(
+                InvoiceRecord.id == inv_key,
+                InvoiceRecord.provider_invoice_id == inv_key,
+                InvoiceRecord.invoice_number == inv_key,
+            ),
+        )
+        inv_rec = session.scalars(stmt_inv).first()
+        if not inv_rec:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Suggested invoice '{inv_key}' could not be resolved in ledger.",
+            )
+
+        norm_inv_status = (inv_rec.status or "").upper()
+        if norm_inv_status in {"DRAFT", "CANCELLED", "PAID", "VOID"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invoice '{inv_rec.invoice_number}' status is '{inv_rec.status}', ineligible for allocation.",
+            )
+
+        if inv_rec.currency != pay.currency:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Currency mismatch: invoice '{inv_rec.invoice_number}' ({inv_rec.currency}) does not match payment currency ({pay.currency}).",
+            )
+
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv_rec.id)
+        if amt > outstanding:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Suggested allocation ({amt}) exceeds invoice '{inv_rec.invoice_number}' outstanding balance ({outstanding}).",
+            )
+        resolved_allocations[inv_rec.id] = amt
+
+    # 3. Proposal Linkage (Requirement 2B)
+    prop_repo = ProposalRepository(session)
+    existing_props = prop_repo.list_by_payment(effective_tenant, pay.id)
+
+    pending_props = [
+        p for p in existing_props
+        if p.outcome == "PROPOSED"
+        and (not p.decisions or p.decisions[-1].decision_type == "PENDING")
+    ]
+
+    target_prop: Optional[ProposalRecord] = None
+    if request.proposal_id:
+        target_prop = next((p for p in pending_props if p.id == request.proposal_id), None)
+        if not target_prop:
+            foreign_prop = session.get(ProposalRecord, request.proposal_id)
+            if foreign_prop and (foreign_prop.tenant_id != effective_tenant or foreign_prop.payment_id != pay.id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Proposal '{request.proposal_id}' belongs to a different payment or tenant.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified proposal '{request.proposal_id}' is not an eligible pending proposal for this payment.",
+            )
+        p_allocs = {pa.invoice_id: pa.amount_minor for pa in target_prop.allocations}
+        if p_allocs != resolved_allocations:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified proposal allocations {p_allocs} do not match recommendation allocations {resolved_allocations}.",
+            )
+    else:
+        matching_props = [
+            p for p in pending_props
+            if {pa.invoice_id: pa.amount_minor for pa in p.allocations} == resolved_allocations
+        ]
+        if len(matching_props) == 1:
+            target_prop = matching_props[0]
+        elif len(matching_props) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Multiple pending proposals match this recommendation. Specify proposal_id explicitly to resolve ambiguity.",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot approve recommendation: No pending deterministic proposal matches the recommended allocation "
+                    f"{resolved_allocations}. Recommendations without a matching verified deterministic proposal "
+                    f"must remain under review rather than fabricating synthetic proposals."
+                ),
+            )
+
+    if target_prop.payment_id != pay.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target proposal belongs to a different payment.",
+        )
+
+    # 4. Atomic Execution via ApprovalService (Requirement 2D)
+    approval_service = ApprovalService(session)
+    idempotency_key = f"invg-approval:{effective_tenant}:{investigation_id}:{target_prop.id}"
+    try:
+        approval_res = approval_service.approve_proposal(
+            tenant_id=effective_tenant,
+            proposal_id=target_prop.id,
+            actor=request.reviewer,
+            idempotency_key=idempotency_key,
+            reason=request.notes or f"Approved via Investigation {investigation_id}",
+        )
+        allocation_ids = list(approval_res.allocation_ids)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to execute approved allocation via ApprovalService: {exc}",
+        ) from exc
+
+    # 5. Record Investigation Resolution & Audit
+    invg_repo.update_status(effective_tenant, investigation_id, "APPROVED")
 
     audit_repo = AuditRepository(session)
     audit_event = audit_repo.append_event(
@@ -1940,10 +2137,12 @@ def approve_investigation(
         subject_id=investigation_id,
         details={
             "investigation_id": investigation_id,
+            "proposal_id": target_prop.id,
             "target_type": inv.target_type,
             "target_id": inv.target_id,
-            "notes": request.notes or "",
+            "reviewer_identity_type": "operator_supplied_label",
             "allocation_ids": allocation_ids,
+            "notes": request.notes or "",
         },
     )
     session.commit()
@@ -1951,6 +2150,7 @@ def approve_investigation(
     return {
         "status": "APPROVED",
         "investigation_id": investigation_id,
+        "proposal_id": target_prop.id,
         "allocation_ids": allocation_ids,
         "audit_event_id": audit_event.event_id,
     }
@@ -1975,6 +2175,12 @@ def reject_investigation(
             detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
         )
 
+    if inv.status in ("APPROVED", "REJECTED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject investigation '{investigation_id}': Already resolved with status '{inv.status}'.",
+        )
+
     invg_repo.update_status(effective_tenant, investigation_id, "REJECTED")
 
     audit_repo = AuditRepository(session)
@@ -1988,6 +2194,7 @@ def reject_investigation(
             "investigation_id": investigation_id,
             "target_type": inv.target_type,
             "target_id": inv.target_id,
+            "reviewer_identity_type": "operator_supplied_label",
             "notes": request.notes or "",
         },
     )
@@ -2087,8 +2294,21 @@ def seed_demo_endpoint(
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """Idempotently seed rich, realistic demo data for the operator dashboard."""
+    """Idempotently seed rich, realistic demo data for operator dashboard review.
+
+    DEMO SAFETY INVARIANT:
+    Seeding is strictly restricted to the dedicated 'demo_merchant' tenant.
+    Never allow synthetic seeding into real merchant tenants.
+    """
     tenant_id = request.tenant_id or "demo_merchant"
+    if tenant_id != "demo_merchant":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Demo data seeding is strictly restricted to the 'demo_merchant' tenant. "
+                f"Cannot seed synthetic data into target tenant '{tenant_id}'."
+            ),
+        )
     result = seed_demo_data(session, tenant_id=tenant_id, force=request.force or False)
     return result
 
