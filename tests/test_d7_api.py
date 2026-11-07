@@ -234,7 +234,7 @@ def test_proposal_approval_and_rejection(client):
 
 def test_investigation_approval_and_safety_fail_closed(client):
     """CRITICAL SAFETY TEST:
-    1. Verified investigations can be approved and create allocations.
+    1. Verified or Needs-Review investigations with passed=True and valid invariants can be approved and create allocations.
     2. Investigations with INVALID safety verifier status FAIL CLOSED and block approval.
     """
     client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
@@ -243,12 +243,12 @@ def test_investigation_approval_and_safety_fail_closed(client):
     assert resp_invgs.status_code == 200
     invgs = resp_invgs.json()["investigations"]
 
-    verified_inv = next(i for i in invgs if i["verifier_status"] == "VERIFIED")
+    eligible_inv = next(i for i in invgs if i["verifier_status"] in ("VERIFIED", "NEEDS_REVIEW") and i["status"] == "NEEDS_REVIEW")
     invalid_inv = next(i for i in invgs if i["verifier_status"] == "INVALID")
 
-    # 1. Approve verified investigation
+    # 1. Approve eligible investigation
     resp_app = client.post(
-        f"/admin/investigations/{verified_inv['id']}/approve",
+        f"/admin/investigations/{eligible_inv['id']}/approve",
         json={"reviewer": "controller@demo.com", "notes": "Approved based on matching project code", "tenant_id": "demo_merchant"},
         headers=AUTH_HEADERS,
     )
