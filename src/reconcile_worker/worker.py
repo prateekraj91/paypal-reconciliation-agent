@@ -209,6 +209,8 @@ class Worker:
                     self._handle_webhook_ingest(session, job)
                 elif job_type == "MANUAL_SYNC":
                     self._handle_manual_sync(session, job)
+                elif job_type == "INVESTIGATE_EXCEPTION":
+                    self._handle_investigate_exception(session, job)
                 else:
                     raise PermanentJobError(f"Unsupported job type: {job_type}")
 
@@ -288,6 +290,29 @@ class Worker:
     # ----------------------------------------------------------------------
     # Job Type Handlers
     # ----------------------------------------------------------------------
+
+    def _handle_investigate_exception(self, session: Session, job: JobRecord) -> None:
+        """Process an AI exception investigation job without autonomous financial mutation."""
+        from reconcile_investigator.service import InvestigationService
+        payload = job.payload
+        investigation_id = payload.get("investigation_id")
+        target_type = payload.get("target_type")
+        target_id = payload.get("target_id")
+
+        if not target_type or not target_id:
+            raise PermanentJobError(f"Missing target_type or target_id in INVESTIGATE_EXCEPTION job payload: {payload}")
+
+        try:
+            service = InvestigationService(session)
+            service.run_investigation(
+                tenant_id=job.tenant_id,
+                target_type=target_type,
+                target_id=target_id,
+                investigation_id=investigation_id,
+            )
+        except Exception as exc:
+            # Re-raise as RetryableJobError for retry
+            raise RetryableJobError(f"Exception during investigation: {exc}") from exc
 
     def _handle_webhook_ingest(self, session: Session, job: JobRecord) -> None:
         """Process a verified PayPal webhook event.

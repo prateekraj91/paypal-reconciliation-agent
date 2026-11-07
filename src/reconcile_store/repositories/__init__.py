@@ -24,6 +24,7 @@ from .audit_repo import AuditRepository
 from .webhook_repo import WebhookInboxRepository, InvalidWebhookStateTransitionError
 from .job_repo import JobRepository
 from .refund_repo import RefundRepository
+from .investigation_repo import InvestigationRepository
 
 __all__ = [
     "BaseRepository",
@@ -45,6 +46,7 @@ __all__ = [
     "AllocationRepository",
     "ProviderSettlementRepository",
     "RefundRepository",
+    "InvestigationRepository",
     "AuditRepository",
     "WebhookInboxRepository",
     "InvalidWebhookStateTransitionError",

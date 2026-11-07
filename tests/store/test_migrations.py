@@ -372,3 +372,48 @@ def test_d5_migration_0004_upgrade_downgrade(temp_sqlite_url):
     proposal_cols_after = {col["name"] for col in inspector.get_columns("proposals")}
     assert "excess_amount_minor" not in proposal_cols_after
     assert "ambiguity_certificate_json" not in proposal_cols_after
+
+
+def test_d6_migration_0005_upgrade_downgrade(temp_sqlite_url):
+    """Verify migration 0005 creates investigations table and downgrades cleanly."""
+    os.environ["RECONCILE_DB_URL"] = temp_sqlite_url
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", temp_sqlite_url)
+
+    # 1. Upgrade up to 0004
+    command.upgrade(alembic_cfg, "0004_d5_advanced_reconciliation")
+    engine = DatabaseEngine(DatabaseConfig(url=temp_sqlite_url)).engine
+    inspector = inspect(engine)
+    tables_0004 = set(inspector.get_table_names())
+    assert "investigations" not in tables_0004
+
+    # 2. Upgrade to 0005_d6_ai_investigations
+    command.upgrade(alembic_cfg, "0005_d6_ai_investigations")
+    inspector = inspect(engine)
+    tables_0005 = set(inspector.get_table_names())
+    assert "investigations" in tables_0005
+
+    # Test inserting an investigation row
+    db = DatabaseEngine(DatabaseConfig(url=temp_sqlite_url))
+    with db.session() as session:
+        session.execute(
+            text("INSERT INTO tenants (id, name, created_at, updated_at) VALUES ('t_d6', 'D6 Tenant', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        )
+        session.execute(
+            text(
+                "INSERT INTO investigations (id, tenant_id, target_type, target_id, status, classification, created_at) "
+                "VALUES ('invg_test_1', 't_d6', 'payment', 'PAY-TEST-1', 'QUEUED', 'UNMATCHED_PAYMENT', CURRENT_TIMESTAMP)"
+            )
+        )
+        session.commit()
+
+        invg_row = session.execute(text("SELECT * FROM investigations WHERE id='invg_test_1'")).fetchone()
+        assert invg_row is not None
+        assert invg_row.target_id == "PAY-TEST-1"
+        assert invg_row.classification == "UNMATCHED_PAYMENT"
+
+    # 3. Downgrade back to 0004
+    command.downgrade(alembic_cfg, "0004_d5_advanced_reconciliation")
+    inspector = inspect(engine)
+    tables_downgraded = set(inspector.get_table_names())
+    assert "investigations" not in tables_downgraded
