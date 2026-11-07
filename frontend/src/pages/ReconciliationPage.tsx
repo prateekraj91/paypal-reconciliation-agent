@@ -207,7 +207,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
             ) : !runDetail || !runDetail.proposals || runDetail.proposals.length === 0 ? (
               <div className="p-12 text-center">
                 <EmptyState
-                  title="Zero match proposals"
+                  title="No match proposals found."
                   description="This run completed with no eligible unapplied match proposals."
                 />
               </div>

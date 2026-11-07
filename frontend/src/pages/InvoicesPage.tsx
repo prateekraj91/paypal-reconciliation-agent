@@ -13,6 +13,7 @@ import {
 import { api } from '../api/client';
 import { InvoiceItem, InvoiceDetail } from '../types/api';
 import { MoneyDisplay, StatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { getInvoiceEmptyLabels } from '../utils/formatters';
 
 export function InvoicesPage({ tenantId }: { tenantId: string }) {
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
@@ -133,8 +134,8 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
         ) : invoices.length === 0 ? (
           <div className="p-8">
             <EmptyState
-              title="No invoices found"
-              description="No canonical invoices match the filter criteria."
+              title={getInvoiceEmptyLabels(statusFilter).title}
+              description={getInvoiceEmptyLabels(statusFilter).description}
             />
           </div>
         ) : (

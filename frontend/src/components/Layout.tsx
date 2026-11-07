@@ -13,6 +13,8 @@ import {
   Server,
   Zap,
   LogOut,
+  Menu,
+  X,
 } from 'lucide-react';
 import { api } from '../api/client';
 
@@ -47,6 +49,7 @@ export const Layout: React.FC<LayoutProps> = ({
   children,
 }) => {
   const [healthStatus, setHealthStatus] = React.useState<'ok' | 'checking' | 'error'>('checking');
+  const [mobileMenuOpen, setMobileMenuOpen] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     api
@@ -54,6 +57,16 @@ export const Layout: React.FC<LayoutProps> = ({
       .then(() => setHealthStatus('ok'))
       .catch(() => setHealthStatus('error'));
   }, []);
+
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && mobileMenuOpen) {
+        setMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileMenuOpen]);
 
   const navItems = [
     { id: 'overview' as NavigationTab, label: 'Overview', icon: LayoutDashboard },
@@ -66,11 +79,25 @@ export const Layout: React.FC<LayoutProps> = ({
   ];
 
   return (
-    <div className="flex min-h-screen bg-[#070a12] text-slate-100">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-slate-800/80 bg-[#0c1222] flex flex-col fixed inset-y-0 z-30">
+    <div className="flex min-h-screen bg-[#070a12] text-slate-100 overflow-x-hidden">
+      {/* Mobile Drawer Backdrop */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40 lg:hidden transition-opacity"
+          onClick={() => setMobileMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Sidebar (Desktop pinned, Mobile off-canvas drawer) */}
+      <aside
+        className={`w-64 border-r border-slate-800/80 bg-[#0c1222] flex flex-col fixed inset-y-0 z-50 lg:z-30 transition-transform duration-200 ease-in-out ${
+          mobileMenuOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+        }`}
+        aria-label="Navigation Sidebar"
+      >
         {/* Brand Header */}
-        <div className="p-5 border-b border-slate-800/80">
+        <div className="p-5 border-b border-slate-800/80 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 font-bold text-sm shadow-[0_0_12px_rgba(59,130,246,0.25)]">
               PR
@@ -85,6 +112,13 @@ export const Layout: React.FC<LayoutProps> = ({
               <p className="text-[11px] text-slate-400 font-mono tracking-tight">You can prove.</p>
             </div>
           </div>
+          <button
+            onClick={() => setMobileMenuOpen(false)}
+            className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 lg:hidden"
+            aria-label="Close navigation menu"
+          >
+            <X size={18} />
+          </button>
         </div>
 
         {/* Tenant Selector */}
@@ -112,7 +146,10 @@ export const Layout: React.FC<LayoutProps> = ({
             return (
               <button
                 key={item.id}
-                onClick={() => onSelectTab(item.id)}
+                onClick={() => {
+                  onSelectTab(item.id);
+                  setMobileMenuOpen(false);
+                }}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-xs font-medium transition-all ${
                   active
                     ? 'bg-blue-600/15 text-blue-400 border border-blue-500/30 shadow-sm'
@@ -159,25 +196,32 @@ export const Layout: React.FC<LayoutProps> = ({
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 ml-64 flex flex-col min-h-screen">
+      <div className="flex-1 w-full lg:ml-64 min-w-0 flex flex-col min-h-screen">
         {/* Top Header */}
-        <header className="h-16 border-b border-slate-800/80 bg-[#090d18]/90 backdrop-blur-md px-8 flex items-center justify-between sticky top-0 z-20">
-          <div className="flex items-center gap-3">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+        <header className="h-16 border-b border-slate-800/80 bg-[#090d18]/90 backdrop-blur-md px-4 sm:px-6 lg:px-8 flex items-center justify-between sticky top-0 z-20">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="p-1.5 -ml-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 lg:hidden"
+              aria-label="Open navigation menu"
+            >
+              <Menu size={20} />
+            </button>
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider truncate">
               {currentTab}
             </span>
-            <span className="text-slate-600">/</span>
-            <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+            <span className="text-slate-600 hidden sm:inline">/</span>
+            <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 truncate max-w-[130px] sm:max-w-none">
               tenant: {tenantId}
             </span>
           </div>
 
-          <div className="flex items-center gap-4">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-medium font-mono">
+          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+            <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-medium font-mono">
               <ShieldCheck size={13} />
               Zero-Mutations Verified
             </span>
-            <span className="text-xs text-slate-400 font-mono">
+            <span className="hidden xl:inline text-xs text-slate-400 font-mono">
               Human-in-the-Loop Mode
             </span>
             <button
@@ -186,13 +230,13 @@ export const Layout: React.FC<LayoutProps> = ({
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 transition-colors"
             >
               <LogOut size={13} />
-              <span>Log Out</span>
+              <span className="hidden sm:inline">Log Out</span>
             </button>
           </div>
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 p-8 overflow-y-auto">
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto min-w-0">
           {children}
         </main>
       </div>

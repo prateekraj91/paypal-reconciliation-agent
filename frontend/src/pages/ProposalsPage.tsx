@@ -13,6 +13,7 @@ import { api } from '../api/client';
 import { ProposalItem, ProposalDetail } from '../types/api';
 import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { ProposalApprovalModal, ProposalRejectModal } from '../components/Modals';
+import { getProposalEmptyLabels } from '../utils/formatters';
 
 export function ProposalsPage({ tenantId }: { tenantId: string }) {
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
@@ -119,8 +120,8 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
         ) : proposals.length === 0 ? (
           <div className="p-12 text-center">
             <EmptyState
-              title={`Zero ${statusFilter.toLowerCase()} proposals`}
-              description="No proposals match the current filter in the review queue."
+              title={getProposalEmptyLabels(statusFilter).title}
+              description={getProposalEmptyLabels(statusFilter).description}
             />
           </div>
         ) : (
