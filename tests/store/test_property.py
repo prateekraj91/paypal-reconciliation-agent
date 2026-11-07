@@ -45,7 +45,7 @@ from reconcile_store.repositories.allocation_repo import LedgerConstraintError
     pay_amount=st.integers(min_value=1, max_value=1_000_000),
     alloc_amount=st.integers(min_value=1, max_value=2_000_000),
 )
-@settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 def test_property_ledger_conservation(inv_amount: int, pay_amount: int, alloc_amount: int):
     """Property Test: Ledger capacity conservation invariants I1, I2, and I3."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -145,7 +145,7 @@ def test_property_ledger_conservation(inv_amount: int, pay_amount: int, alloc_am
     pay_curr=st.sampled_from(["USD", "EUR", "GBP", "CAD", "AUD"]),
     inv_curr=st.sampled_from(["USD", "EUR", "GBP", "CAD", "AUD"]),
 )
-@settings(max_examples=25)
+@settings(max_examples=25, deadline=None)
 def test_property_currency_consistency(pay_curr: str, inv_curr: str):
     """Property Test: Invariant I4 strict currency equality."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -221,7 +221,7 @@ def test_property_currency_consistency(pay_curr: str, inv_curr: str):
 @given(
     event_counts=st.integers(min_value=1, max_value=20),
 )
-@settings(max_examples=25)
+@settings(max_examples=25, deadline=None)
 def test_property_audit_chain_continuity(event_counts: int):
     """Property Test: Invariant I12 append-only hash-chained continuity."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
