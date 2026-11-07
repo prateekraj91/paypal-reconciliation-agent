@@ -12,6 +12,7 @@ import {
   Building2,
   Server,
   Zap,
+  LogOut,
 } from 'lucide-react';
 import { api } from '../api/client';
 
@@ -31,6 +32,7 @@ interface LayoutProps {
   onTenantChange: (tenant: string) => void;
   onSeedDemo: () => Promise<void>;
   isSeeding: boolean;
+  onLogout: () => void;
   children: React.ReactNode;
 }
 
@@ -41,6 +43,7 @@ export const Layout: React.FC<LayoutProps> = ({
   onTenantChange,
   onSeedDemo,
   isSeeding,
+  onLogout,
   children,
 }) => {
   const [healthStatus, setHealthStatus] = React.useState<'ok' | 'checking' | 'error'>('checking');
@@ -177,6 +180,14 @@ export const Layout: React.FC<LayoutProps> = ({
             <span className="text-xs text-slate-400 font-mono">
               Human-in-the-Loop Mode
             </span>
+            <button
+              onClick={onLogout}
+              title="Log out and purge credential from memory"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 transition-colors"
+            >
+              <LogOut size={13} />
+              <span>Log Out</span>
+            </button>
           </div>
         </header>
 

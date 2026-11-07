@@ -300,7 +300,7 @@ export interface InvestigationDetail {
   tenant_id: string;
   target_type: string;
   target_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'NEEDS_REVIEW' | 'COMPLETED' | 'FAILED' | 'INVALID' | 'REJECTED';
+  status: 'QUEUED' | 'RUNNING' | 'NEEDS_REVIEW' | 'COMPLETED' | 'FAILED' | 'INVALID' | 'REJECTED' | 'APPROVED';
   classification: string;
   summary: string;
   verifier_status: VerifierStatus;

@@ -9,9 +9,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, date, timedelta
 from typing import Any, Dict, Optional
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 import uuid
 
+from reconcile_store.schema import (
+    AllocationRecord,
+    DecisionRecord,
+    VerificationRecord,
+    ProposalAllocationRecord,
+    ProposalRecord,
+    ReconciliationRunRecord,
+    InvestigationRecord,
+    ProviderSettlementRecord,
+    PaymentRecord,
+    InvoiceRecord,
+    AuditEventRecord,
+)
 from reconcile_store.repositories.tenant_repo import TenantRepository, ConnectionRepository
 from reconcile_store.repositories.payment_repo import PaymentRepository
 from reconcile_store.repositories.invoice_repo import InvoiceRepository
@@ -40,7 +54,17 @@ def seed_demo_data(
     tenant_id: str = "demo_merchant",
     force: bool = False,
 ) -> Dict[str, Any]:
-    """Idempotently seed rich, realistic demo data for operator dashboard review."""
+    """Idempotently seed rich, realistic demo data for operator dashboard review.
+
+    DEMO SAFETY INVARIANT:
+    Seeding synthetic demo records is STRICTLY RESTRICTED to the 'demo_merchant' tenant.
+    Never run against real merchant tenants or live databases.
+    """
+    if tenant_id != "demo_merchant":
+        raise ValueError(
+            f"Demo data seeding is strictly restricted to 'demo_merchant'. Target tenant '{tenant_id}' is invalid."
+        )
+
     tenant_repo = TenantRepository(session)
     conn_repo = ConnectionRepository(session)
     payment_repo = PaymentRepository(session)
@@ -69,6 +93,21 @@ def seed_demo_data(
             "message": "Demo data already exists for this tenant. Use force=True to reseed.",
             "payments_count": len(existing_payments),
         }
+
+    # Safe reseed: Purge prior demo_merchant records in dependency order
+    if existing_payments and force:
+        session.execute(delete(AllocationRecord).where(AllocationRecord.tenant_id == tenant_id))
+        session.execute(delete(DecisionRecord).where(DecisionRecord.tenant_id == tenant_id))
+        session.execute(delete(VerificationRecord).where(VerificationRecord.tenant_id == tenant_id))
+        session.execute(delete(ProposalAllocationRecord).where(ProposalAllocationRecord.tenant_id == tenant_id))
+        session.execute(delete(ProposalRecord).where(ProposalRecord.tenant_id == tenant_id))
+        session.execute(delete(ReconciliationRunRecord).where(ReconciliationRunRecord.tenant_id == tenant_id))
+        session.execute(delete(InvestigationRecord).where(InvestigationRecord.tenant_id == tenant_id))
+        session.execute(delete(ProviderSettlementRecord).where(ProviderSettlementRecord.tenant_id == tenant_id))
+        session.execute(delete(PaymentRecord).where(PaymentRecord.tenant_id == tenant_id))
+        session.execute(delete(InvoiceRecord).where(InvoiceRecord.tenant_id == tenant_id))
+        session.execute(delete(AuditEventRecord).where(AuditEventRecord.tenant_id == tenant_id))
+        session.flush()
 
     now = datetime.now(timezone.utc)
     today = now.date()
