@@ -22,6 +22,7 @@ class ApiClient {
   private tenantId: string = 'demo_merchant';
   private apiKey: string = '';
   private onUnauthorizedCallback?: () => void;
+  private inFlightRequests: Map<string, Promise<any>> = new Map();
 
   public setTenantId(tenantId: string) {
     this.tenantId = tenantId;
@@ -37,6 +38,7 @@ class ApiClient {
 
   public clearApiKey() {
     this.apiKey = '';
+    this.inFlightRequests.clear();
   }
 
   public hasApiKey(): boolean {
@@ -54,41 +56,60 @@ class ApiClient {
       );
     }
 
-    const url = `${API_BASE_URL}${endpoint}`;
-    const headers = new Headers(options.headers || {});
-    headers.set('Authorization', `Bearer ${this.apiKey}`);
-    if (!headers.has('Content-Type') && options.body) {
-      headers.set('Content-Type', 'application/json');
+    const method = (options.method || 'GET').toUpperCase();
+    const isGet = method === 'GET';
+    const cacheKey = isGet ? `${method}:${endpoint}:${this.apiKey}` : null;
+
+    if (cacheKey && this.inFlightRequests.has(cacheKey)) {
+      return this.inFlightRequests.get(cacheKey) as Promise<T>;
     }
 
-    const response = await fetch(url, {
-      ...options,
-      headers,
-    });
-
-    if (response.status === 401) {
-      if (this.onUnauthorizedCallback) {
-        this.onUnauthorizedCallback();
+    const execPromise = (async () => {
+      const url = `${API_BASE_URL}${endpoint}`;
+      const headers = new Headers(options.headers || {});
+      headers.set('Authorization', `Bearer ${this.apiKey}`);
+      if (!headers.has('Content-Type') && options.body) {
+        headers.set('Content-Type', 'application/json');
       }
-      throw new Error(
-        'Authentication failed (401 Unauthorized): Invalid or expired admin bearer credential.'
-      );
-    }
 
-    if (!response.ok) {
-      let errorMsg = `HTTP Error ${response.status} ${response.statusText}`;
-      try {
-        const errJson = await response.json();
-        if (errJson && errJson.detail) {
-          errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      const response = await fetch(url, {
+        ...options,
+        headers,
+      });
+
+      if (response.status === 401) {
+        if (this.onUnauthorizedCallback) {
+          this.onUnauthorizedCallback();
         }
-      } catch {
-        // fallback to status text
+        throw new Error(
+          'Authentication failed (401 Unauthorized): Invalid or expired admin bearer credential.'
+        );
       }
-      throw new Error(errorMsg);
+
+      if (!response.ok) {
+        let errorMsg = `HTTP Error ${response.status} ${response.statusText}`;
+        try {
+          const errJson = await response.json();
+          if (errJson && errJson.detail) {
+            errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+          }
+        } catch {
+          // fallback to status text
+        }
+        throw new Error(errorMsg);
+      }
+
+      return response.json() as Promise<T>;
+    })();
+
+    if (cacheKey) {
+      this.inFlightRequests.set(cacheKey, execPromise);
+      execPromise.finally(() => {
+        this.inFlightRequests.delete(cacheKey);
+      });
     }
 
-    return response.json() as Promise<T>;
+    return execPromise;
   }
 
   // Dashboard
@@ -304,12 +325,24 @@ class ApiClient {
 
   // Health / Readiness (Public endpoint)
   public async checkHealth(): Promise<{ status: string; service: string }> {
-    const url = `${API_BASE_URL}/health`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Health check failed with status ${response.status}`);
+    const cacheKey = 'HEALTH_CHECK';
+    if (this.inFlightRequests.has(cacheKey)) {
+      return this.inFlightRequests.get(cacheKey)!;
     }
-    return response.json();
+    const healthPromise = (async () => {
+      const url = `${API_BASE_URL}/health`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Health check failed with status ${response.status}`);
+      }
+      return response.json();
+    })();
+
+    this.inFlightRequests.set(cacheKey, healthPromise);
+    healthPromise.finally(() => {
+      this.inFlightRequests.delete(cacheKey);
+    });
+    return healthPromise;
   }
 }
 

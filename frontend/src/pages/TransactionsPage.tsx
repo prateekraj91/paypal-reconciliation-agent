@@ -15,6 +15,7 @@ import {
 import { api } from '../api/client';
 import { TransactionItem, TransactionDetail } from '../types/api';
 import { MoneyDisplay, StatusBadge, VerifierStatusBadge, HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { getTransactionEmptyLabels } from '../utils/formatters';
 
 export function TransactionsPage({
   tenantId,
@@ -146,8 +147,8 @@ export function TransactionsPage({
         ) : transactions.length === 0 ? (
           <div className="p-8">
             <EmptyState
-              title="No transactions found"
-              description="No financial transactions match the selected filters for this tenant."
+              title={getTransactionEmptyLabels(statusFilter).title}
+              description={getTransactionEmptyLabels(statusFilter).description}
             />
           </div>
         ) : (

@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import { DashboardSummary } from '../types/api';
 import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner } from '../components/Common';
 import { NavigationTab } from '../components/Layout';
+import { formatReconciliationRate } from '../utils/formatters';
 
 export function OverviewPage({
   tenantId,
@@ -62,13 +63,10 @@ export function OverviewPage({
   }
 
   const { counts, financial_totals, recent_runs, recent_exceptions, recent_investigations } = summary;
-  const reconciliationRate =
-    counts.total_payments > 0
-      ? Math.round((counts.reconciled_payments / counts.total_payments) * 100)
-      : 100;
+  const rateInfo = formatReconciliationRate(counts.reconciled_payments, counts.total_payments);
 
   return (
-    <div className="space-y-8 animate-fade-in">
+    <div className="space-y-8 animate-fade-in min-w-0">
       {/* Top Welcome & Actions */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
@@ -102,20 +100,22 @@ export function OverviewPage({
         <div className="fintech-card relative overflow-hidden">
           <div className="flex justify-between items-start">
             <span className="text-xs font-medium text-slate-400">Reconciliation Rate</span>
-            <div className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-400">
+            <div className={`p-1.5 rounded-md ${rateInfo.rate !== null ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
               <CheckCircle2 size={16} />
             </div>
           </div>
           <div className="mt-3 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-white">{reconciliationRate}%</span>
+            <span className="text-2xl font-bold font-mono text-white">{rateInfo.displayText}</span>
             <span className="text-xs text-slate-400 font-medium">
               ({counts.reconciled_payments} of {counts.total_payments})
             </span>
           </div>
           <div className="mt-3 w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
             <div
-              className="bg-emerald-500 h-1.5 rounded-full transition-all duration-500"
-              style={{ width: `${reconciliationRate}%` }}
+              className={`h-1.5 rounded-full transition-all duration-500 ${
+                rateInfo.rate !== null ? 'bg-emerald-500' : 'bg-slate-700'
+              }`}
+              style={{ width: `${rateInfo.progressPercent}%` }}
             />
           </div>
         </div>
@@ -197,32 +197,38 @@ export function OverviewPage({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Object.entries(financial_totals).map(([curr, bucket]) => (
-            <div key={curr} className="p-4 rounded-lg bg-slate-900/80 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                <span className="font-mono font-bold text-sm text-blue-400 px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40">
-                  {curr}
-                </span>
-                <span className="text-xs text-slate-400">Total Payments: {counts.total_payments}</span>
+        {Object.keys(financial_totals).length === 0 ? (
+          <div className="py-8 px-4 text-center rounded-lg border border-dashed border-slate-800 bg-slate-900/30">
+            <p className="text-xs text-slate-400">No currency balances available yet.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {Object.entries(financial_totals).map(([curr, bucket]) => (
+              <div key={curr} className="p-4 rounded-lg bg-slate-900/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <span className="font-mono font-bold text-sm text-blue-400 px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40">
+                    {curr}
+                  </span>
+                  <span className="text-xs text-slate-400">Total Payments: {counts.total_payments}</span>
+                </div>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between text-slate-300">
+                    <span className="text-slate-400">Payments Ingested:</span>
+                    <MoneyDisplay amountMinor={bucket.payments_amount_minor} currency={curr} />
+                  </div>
+                  <div className="flex justify-between text-slate-300">
+                    <span className="text-slate-400">Reconciled to Invoices:</span>
+                    <MoneyDisplay amountMinor={bucket.reconciled_amount_minor} currency={curr} className="text-emerald-400" />
+                  </div>
+                  <div className="flex justify-between text-slate-300 pt-1.5 border-t border-slate-800">
+                    <span className="text-amber-400 font-medium">Unapplied Cash:</span>
+                    <MoneyDisplay amountMinor={bucket.unapplied_cash_minor} currency={curr} className="text-amber-400" />
+                  </div>
+                </div>
               </div>
-              <div className="space-y-1.5 text-xs">
-                <div className="flex justify-between text-slate-300">
-                  <span className="text-slate-400">Payments Ingested:</span>
-                  <MoneyDisplay amountMinor={bucket.payments_amount_minor} currency={curr} />
-                </div>
-                <div className="flex justify-between text-slate-300">
-                  <span className="text-slate-400">Reconciled to Invoices:</span>
-                  <MoneyDisplay amountMinor={bucket.reconciled_amount_minor} currency={curr} className="text-emerald-400" />
-                </div>
-                <div className="flex justify-between text-slate-300 pt-1.5 border-t border-slate-800">
-                  <span className="text-amber-400 font-medium">Unapplied Cash:</span>
-                  <MoneyDisplay amountMinor={bucket.unapplied_cash_minor} currency={curr} className="text-amber-400" />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Two Column Layout: Recent Exceptions & Investigations */}

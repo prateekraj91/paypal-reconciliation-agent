@@ -13,6 +13,7 @@ import { api } from '../api/client';
 import { InvestigationDetail } from '../types/api';
 import { StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { NewInvestigationModal } from '../components/Modals';
+import { getInvestigationEmptyLabels } from '../utils/formatters';
 
 export function InvestigationsPage({
   tenantId,
@@ -134,8 +135,8 @@ export function InvestigationsPage({
         ) : investigations.length === 0 ? (
           <div className="p-12 text-center">
             <EmptyState
-              title={`Zero ${statusFilter.toLowerCase()} investigations`}
-              description="No investigation cases match the selected status."
+              title={getInvestigationEmptyLabels(statusFilter).title}
+              description={getInvestigationEmptyLabels(statusFilter).description}
             />
           </div>
         ) : (

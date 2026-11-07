@@ -73,6 +73,29 @@ def test_demo_seed_and_idempotency(client):
     assert data3["status"] == "seeded"
 
 
+def test_dashboard_summary_empty_tenant_zero_denominator(client):
+    """Verify dashboard summary handles an empty tenant with zero transactions and empty currency ledger."""
+    resp = client.get("/admin/dashboard/summary?tenant_id=test_tenant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["tenant_id"] == "test_tenant"
+    counts = data["counts"]
+    # Total payments is 0 (zero denominator for reconciliation rate)
+    assert counts["total_payments"] == 0
+    assert counts["reconciled_payments"] == 0
+    assert counts["open_exceptions"] == 0
+    assert counts["total_invoices"] == 0
+    assert counts["total_proposals"] == 0
+    assert counts["total_investigations"] == 0
+
+    # Currency ledger must be empty without error (triggers UI 'No currency balances available yet.')
+    assert data["financial_totals"] == {}
+    assert data["recent_runs"] == []
+    assert data["recent_exceptions"] == []
+    assert data["recent_investigations"] == []
+
+
 def test_dashboard_summary(client):
     """Verify dashboard summary provides currency-partitioned metrics and recent activity."""
     # Seed data first
