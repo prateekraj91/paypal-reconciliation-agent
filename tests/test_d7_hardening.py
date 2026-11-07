@@ -56,6 +56,22 @@ from reconcile_store.approval import ApprovalService
 ADMIN_KEY = "test-hardening-admin-key-9999"
 AUTH_HEADERS = {"Authorization": f"Bearer {ADMIN_KEY}"}
 
+VALID_VERIFIER_DETAILS = {
+    "status": "NEEDS_REVIEW",
+    "passed": True,
+    "issues": [],
+    "checked_invariants": {
+        "tenant_isolation": True,
+        "target_entity_exists": True,
+        "evidence_references_authentic": True,
+        "facts_strictly_grounded": True,
+        "financial_capacity_safe": True,
+        "settlement_allocation_distinction": True,
+        "no_autonomous_financial_mutation": True,
+    },
+    "summary": "All authoritative financial evidence verified.",
+}
+
 
 @pytest.fixture
 def test_db():
@@ -162,8 +178,8 @@ def test_investigation_approval_invalid_verifier_status(client, test_db):
 
 
 def test_investigation_approval_missing_or_unverified_status(client, test_db):
-    """Investigation with verifier_status=NOT_VERIFIED, UNVERIFIED, or NEEDS_REVIEW MUST fail closed."""
-    for bad_status in ["NOT_VERIFIED", "UNVERIFIED", "NEEDS_REVIEW", "UNKNOWN"]:
+    """Investigation with verifier_status=NOT_VERIFIED, UNVERIFIED, or UNKNOWN MUST fail closed."""
+    for bad_status in ["NOT_VERIFIED", "UNVERIFIED", "UNKNOWN"]:
         with test_db.session() as s:
             inv_repo = InvestigationRepository(s)
             inv = inv_repo.create_investigation("demo_merchant", "payment", f"PAY-{bad_status}", status="NEEDS_REVIEW")
@@ -178,16 +194,18 @@ def test_investigation_approval_missing_or_unverified_status(client, test_db):
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 400
-        assert "VERIFIED" in resp.json()["detail"]
+        assert "VERIFIED" in resp.json()["detail"] or "UNVERIFIED" in resp.json()["detail"] or "NEEDS_REVIEW" in resp.json()["detail"]
 
 
 def test_investigation_approval_incomplete_status(client, test_db):
     """Incomplete investigations (QUEUED, RUNNING, FAILED) MUST be rejected."""
+    import json
     for incomplete_status in ["QUEUED", "RUNNING", "FAILED"]:
         with test_db.session() as s:
             inv_repo = InvestigationRepository(s)
             inv = inv_repo.create_investigation("demo_merchant", "payment", f"PAY-{incomplete_status}", status=incomplete_status)
-            inv.verifier_status = "VERIFIED"
+            inv.verifier_status = "NEEDS_REVIEW"
+            inv.verifier_details_json = json.dumps(VALID_VERIFIER_DETAILS)
             inv.result_json = '{"suggested_resolution": {"resolution_type": "ALLOCATE_PAYMENT", "suggested_invoice_ids": ["INV-1"], "suggested_amount_cents": 1000}}'
             s.commit()
             inv_id = inv.id
@@ -206,7 +224,7 @@ def test_repeated_investigation_approval(client):
     client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
 
     resp_invgs = client.get("/admin/investigations?tenant_id=demo_merchant", headers=AUTH_HEADERS)
-    verified_inv = next(i for i in resp_invgs.json()["investigations"] if i["verifier_status"] == "VERIFIED")
+    verified_inv = next(i for i in resp_invgs.json()["investigations"] if i["verifier_status"] in ("VERIFIED", "NEEDS_REVIEW") and i["status"] == "NEEDS_REVIEW")
 
     # 1. First approval succeeds
     resp1 = client.post(
@@ -272,8 +290,8 @@ def test_proposal_linkage_belongs_to_different_payment(client, test_db):
                 }
             },
             evidence_references=[],
-            verifier_status="VERIFIED",
-            verifier_details={"passed": True, "notes": []},
+            verifier_status="NEEDS_REVIEW",
+            verifier_details=VALID_VERIFIER_DETAILS,
         )
         s.commit()
         inv_id = inv.id
@@ -315,8 +333,8 @@ def test_missing_and_zero_suggested_amount(client, test_db):
                     }
                 },
                 evidence_references=[],
-                verifier_status="VERIFIED",
-                verifier_details={"passed": True, "notes": []},
+                verifier_status="NEEDS_REVIEW",
+                verifier_details=VALID_VERIFIER_DETAILS,
             )
             s.commit()
             inv_id = investigation.id
@@ -385,8 +403,8 @@ def test_incorrect_invoice_capacity(client, test_db):
                 }
             },
             evidence_references=[],
-            verifier_status="VERIFIED",
-            verifier_details={"passed": True, "notes": []},
+            verifier_status="NEEDS_REVIEW",
+            verifier_details=VALID_VERIFIER_DETAILS,
         )
         s.commit()
         inv_id = invg.id
@@ -447,8 +465,8 @@ def test_split_allocation_across_multiple_invoices(client, test_db):
                 }
             },
             evidence_references=[],
-            verifier_status="VERIFIED",
-            verifier_details={"passed": True, "notes": []},
+            verifier_status="NEEDS_REVIEW",
+            verifier_details=VALID_VERIFIER_DETAILS,
         )
         s.commit()
         inv_id = invg.id
@@ -494,8 +512,8 @@ def test_split_allocation_exceeding_payment_total(client, test_db):
                 }
             },
             evidence_references=[],
-            verifier_status="VERIFIED",
-            verifier_details={"passed": True, "notes": []},
+            verifier_status="NEEDS_REVIEW",
+            verifier_details=VALID_VERIFIER_DETAILS,
         )
         s.commit()
         inv_id = invg.id
@@ -625,8 +643,8 @@ def test_multiple_pending_proposals_requires_disambiguation(client, test_db):
                 }
             },
             evidence_references=[],
-            verifier_status="VERIFIED",
-            verifier_details={"passed": True, "notes": []},
+            verifier_status="NEEDS_REVIEW",
+            verifier_details=VALID_VERIFIER_DETAILS,
         )
         s.commit()
         inv_id = invg.id

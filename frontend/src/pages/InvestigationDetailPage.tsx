@@ -89,8 +89,28 @@ export function InvestigationDetailPage({
   const riskFlags = result.risk_flags || [];
   const verifierNotes = result.verifier_notes || inv.verifier_details?.notes || [];
 
-  const isVerifierApproved = inv.verifier_status === 'VERIFIED';
-  const isInvalid = !isVerifierApproved;
+  const verifierDetails = inv.verifier_details || {};
+  const checkedInvariants = (verifierDetails.checked_invariants || {}) as Record<string, boolean>;
+  const hasVerifierIssues = Array.isArray(verifierDetails.issues) && verifierDetails.issues.length > 0;
+  const hasFailedInvariants =
+    Object.keys(checkedInvariants).length === 0 || Object.values(checkedInvariants).some((v) => v !== true);
+
+  const BLOCKING_PATTERNS = ['INJECTION', 'CURRENCY_MISMATCH', 'CONTRADICT', 'REVERSAL', 'DISPUTE', 'REJECTED', 'MALFORMED'];
+  const hasBlockingRiskFlag = (riskFlags || []).some((flag: string) =>
+    BLOCKING_PATTERNS.some((pat) => String(flag).toUpperCase().includes(pat))
+  );
+  const hasConflictingEvidence = Array.isArray(result.conflicting_evidence) && result.conflicting_evidence.length > 0;
+
+  const isEligibleVerifierStatus = inv.verifier_status === 'VERIFIED' || inv.verifier_status === 'NEEDS_REVIEW';
+  const isVerifierPassed =
+    isEligibleVerifierStatus &&
+    verifierDetails.passed === true &&
+    !hasVerifierIssues &&
+    !hasFailedInvariants &&
+    !hasBlockingRiskFlag &&
+    !hasConflictingEvidence;
+
+  const isInvalid = !isVerifierPassed;
   const isResolved = inv.status === 'APPROVED' || inv.status === 'REJECTED';
 
   // Compute allocation distribution for display
@@ -557,7 +577,7 @@ export function InvestigationDetailPage({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !reviewer.trim() || !isVerifierApproved}
+              disabled={isSubmitting || !reviewer.trim() || isInvalid}
               className="btn btn-success text-xs font-semibold px-4"
             >
               {isSubmitting ? 'Executing Allocation Transaction...' : 'Confirm & Authorize'}

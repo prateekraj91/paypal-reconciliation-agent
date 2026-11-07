@@ -305,8 +305,13 @@ export interface InvestigationDetail {
   summary: string;
   verifier_status: VerifierStatus;
   verifier_details?: {
+    status?: string;
     passed?: boolean;
     notes?: string[];
+    issues?: string[];
+    verified_evidence_ids?: string[];
+    checked_invariants?: Record<string, boolean>;
+    summary?: string;
   } | null;
   evidence_references?: EvidenceReference[];
   result?: {
@@ -316,6 +321,7 @@ export interface InvestigationDetail {
     verified_facts?: VerifiedFact[];
     supporting_evidence?: EvidenceReference[];
     candidate_invoice_analysis?: CandidateAnalysis[];
+    conflicting_evidence?: Array<{ issue: string; evidence_ids: string[] }>;
     hypotheses?: Hypothesis[];
     missing_evidence?: MissingEvidenceItem[];
     recommended_steps?: RecommendedStep[];

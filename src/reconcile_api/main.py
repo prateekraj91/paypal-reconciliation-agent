@@ -1848,11 +1848,16 @@ def approve_investigation(
     """Approve an investigation recommendation.
 
     NON-NEGOTIABLE FINANCIAL SAFETY INVARIANTS:
-    1. Investigation Eligibility:
+    1. Investigation Eligibility & Independent Verifier Semantics:
        - Reject if already resolved (APPROVED or REJECTED).
        - Must be in completed human-review state ('NEEDS_REVIEW' or 'COMPLETED').
-       - Independent safety verifier status must explicitly be 'VERIFIED'.
-         INVALID, UNVERIFIED, NEEDS_REVIEW, or missing statuses are strictly rejected (fail-closed).
+       - Independent safety verifier status must explicitly be 'VERIFIED' or 'NEEDS_REVIEW'.
+       - verifier_details.passed must explicitly be True.
+       - All 7 required checked_invariants must explicitly be True.
+       - verifier_details.issues must be empty.
+       - INVALID, UNVERIFIED, NOT_VERIFIED, missing details, passed=False, or failed invariants strictly rejected (fail-closed).
+       - Blocking risk flags (prompt injection, currency mismatch, contradictory provider record, etc.) strictly prevent approval.
+       - Unresolved contradictory financial evidence strictly prevents approval.
     2. Proposal Linkage:
        - Prefer approving an existing deterministic proposal explicitly linked to the target payment.
        - Proposal must still be pending.
@@ -1880,8 +1885,8 @@ def approve_investigation(
             detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
         )
 
-    # 1. Eligibility Checks (Requirement 2A)
-    # Check independent verifier status: strictly VERIFIED (fail-closed)
+    # 1. Eligibility Checks & Verifier Semantics
+    # Independent safety verifier status must explicitly be VERIFIED or NEEDS_REVIEW with passed=True
     norm_verifier_status = (inv.verifier_status or "").upper()
     if norm_verifier_status == "INVALID":
         raise HTTPException(
@@ -1891,15 +1896,75 @@ def approve_investigation(
                 "Financial mutation is strictly blocked (fail-closed)."
             ),
         )
-    if norm_verifier_status != "VERIFIED":
+    if norm_verifier_status in ("UNVERIFIED", "NOT_VERIFIED", ""):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status or 'MISSING'}'. "
-                "Only explicitly 'VERIFIED' investigations are eligible for operator approval (fail-closed)."
+                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status or 'UNVERIFIED'}'. "
+                "Unverified investigations cannot be approved (fail-closed)."
+            ),
+        )
+    if norm_verifier_status not in ("VERIFIED", "NEEDS_REVIEW"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status}'. "
+                "Only 'VERIFIED' or 'NEEDS_REVIEW' investigations with passed safety checks are eligible (fail-closed)."
             ),
         )
 
+    # Verifier details, issues, and invariant checks (Requirements C, D, E)
+    v_details = inv.verifier_details
+    if not v_details or not isinstance(v_details, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Missing or malformed verifier details (fail-closed).",
+        )
+
+    if v_details.get("passed") is not True:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Independent safety verifier 'passed' check is not True (fail-closed).",
+        )
+
+    issues = v_details.get("issues")
+    if issues and len(issues) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Independent safety verifier reported issues: {issues} (fail-closed).",
+        )
+
+    REQUIRED_VERIFIER_INVARIANTS = {
+        "tenant_isolation",
+        "target_entity_exists",
+        "evidence_references_authentic",
+        "facts_strictly_grounded",
+        "financial_capacity_safe",
+        "settlement_allocation_distinction",
+        "no_autonomous_financial_mutation",
+    }
+    checked_invariants = v_details.get("checked_invariants")
+    if not isinstance(checked_invariants, dict) or not checked_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Verifier checked invariants are missing (fail-closed).",
+        )
+
+    missing_invariants = REQUIRED_VERIFIER_INVARIANTS - set(checked_invariants.keys())
+    if missing_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Missing required safety invariants: {sorted(missing_invariants)} (fail-closed).",
+        )
+
+    failed_invariants = [k for k, v in checked_invariants.items() if v is not True]
+    if failed_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Safety invariants failed: {failed_invariants} (fail-closed).",
+        )
+
+    # Investigation Lifecycle Status (Requirement A)
     if inv.status in ("APPROVED", "REJECTED"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1915,8 +1980,43 @@ def approve_investigation(
             ),
         )
 
-    # 2. Extract and Validate Suggested Resolution (Requirement 2C)
+    # 2. Extract and Validate Suggested Resolution & Risk Checks (Requirements F, G)
     result_dict = inv.result or {}
+
+    classification = (result_dict.get("classification") or inv.classification or "").upper()
+    if classification in ("PROMPT_INJECTION_SUSPECT", "CURRENCY_MISMATCH"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Exception classification '{classification}' is blocking.",
+        )
+
+    risk_flags = result_dict.get("risk_flags") or []
+    if isinstance(risk_flags, list):
+        BLOCKING_RISK_PATTERNS = (
+            "INJECTION",
+            "CURRENCY_MISMATCH",
+            "CONTRADICT",
+            "REVERSAL",
+            "DISPUTE",
+            "REJECTED",
+            "MALFORMED",
+            "SCHEMA_VALIDATION",
+        )
+        for rf in risk_flags:
+            norm_rf = str(rf).strip().upper()
+            if any(pat in norm_rf for pat in BLOCKING_RISK_PATTERNS):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot approve investigation: Blocking risk flag detected: '{rf}'.",
+                )
+
+    conflicting_ev = result_dict.get("conflicting_evidence") or []
+    if conflicting_ev and len(conflicting_ev) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Unresolved contradictory financial evidence present ({len(conflicting_ev)} conflict(s)).",
+        )
+
     suggested_res = result_dict.get("suggested_resolution")
     if not suggested_res:
         raise HTTPException(

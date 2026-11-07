@@ -33,6 +33,7 @@ from reconcile_store.repositories.investigation_repo import InvestigationReposit
 from reconcile_store.repositories.audit_repo import AuditRepository
 from reconcile_store.workflow import StorageWorkflow
 from reconcile_store.approval import ApprovalService
+from reconcile_investigator.verifier import IndependentSafetyVerifier
 from reconcile_investigator.models import (
     InvestigationResult,
     InvestigationClassification,
@@ -444,6 +445,11 @@ def seed_demo_data(
         completed_at=now,
     )
 
+    verifier = IndependentSafetyVerifier(session, tenant_id)
+    ver_res1 = verifier.verify_investigation(invg_result_valid)
+    invg_result_valid.verifier_status = ver_res1.status
+    invg_result_valid.verifier_notes = list(ver_res1.issues)
+
     inv_rec1 = investigation_repo.create_investigation(
         tenant_id=tenant_id,
         target_type="payment",
@@ -461,8 +467,8 @@ def seed_demo_data(
         summary=invg_result_valid.executive_summary,
         result_dict=invg_result_valid.model_dump(mode="json"),
         evidence_references=[e.model_dump(mode="json") for e in invg_result_valid.supporting_evidence],
-        verifier_status="VERIFIED",
-        verifier_details={"passed": True, "notes": invg_result_valid.verifier_notes},
+        verifier_status=ver_res1.status.value,
+        verifier_details=ver_res1.to_dict(),
         model_provider="ollama",
         model_name="qwen3:8b",
     )
@@ -554,7 +560,21 @@ def seed_demo_data(
         result_dict=invg_result_invalid.model_dump(mode="json"),
         evidence_references=[e.model_dump(mode="json") for e in invg_result_invalid.supporting_evidence],
         verifier_status="INVALID",
-        verifier_details={"passed": False, "notes": invg_result_invalid.verifier_notes},
+        verifier_details={
+            "status": "INVALID",
+            "passed": False,
+            "issues": list(invg_result_invalid.verifier_notes),
+            "checked_invariants": {
+                "tenant_isolation": True,
+                "target_entity_exists": True,
+                "evidence_references_authentic": False,
+                "facts_strictly_grounded": False,
+                "financial_capacity_safe": False,
+                "settlement_allocation_distinction": True,
+                "no_autonomous_financial_mutation": True,
+            },
+            "summary": "Verification failed closed on prompt injection tokens.",
+        },
         model_provider="ollama",
         model_name="qwen3:8b",
     )
