@@ -166,18 +166,18 @@ export function TransactionsPage({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="fintech-table">
+            <table className="fintech-table min-w-[960px]">
               <thead>
                 <tr>
-                  <th>Type</th>
-                  <th>Payment ID</th>
-                  <th>Payer</th>
-                  <th>Received Date</th>
-                  <th>Gross Amount</th>
-                  <th>Net Amount</th>
-                  <th>Unapplied Cash</th>
-                  <th>Reconciliation State</th>
-                  <th className="col-sticky-right text-right">Actions</th>
+                  <th className="w-24 whitespace-nowrap">Type</th>
+                  <th className="w-36 whitespace-nowrap">Payment ID</th>
+                  <th className="min-w-[150px]">Payer</th>
+                  <th className="hidden xl:table-cell whitespace-nowrap">Received Date</th>
+                  <th className="whitespace-nowrap text-right pr-3">Gross Amount</th>
+                  <th className="whitespace-nowrap text-right pr-3">Net Amount</th>
+                  <th className="whitespace-nowrap text-right pr-3">Unapplied Cash</th>
+                  <th className="whitespace-nowrap">Reconciliation State</th>
+                  <th className="col-sticky-right text-right w-28 whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -187,10 +187,10 @@ export function TransactionsPage({
                     onClick={() => openDetail(tx.provider_payment_id)}
                     className="cursor-pointer"
                   >
-                    <td>
+                    <td className="whitespace-nowrap">
                       <RecordTypeBadge recordType={tx.record_type || 'PAYMENT'} />
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap">
                       <span className="font-mono text-xs text-blue-400 font-medium">
                         {tx.provider_payment_id}
                       </span>
@@ -203,10 +203,10 @@ export function TransactionsPage({
                         <div className="text-[11px] text-slate-500 font-mono">{tx.payer_email}</div>
                       )}
                     </td>
-                    <td className="text-xs text-slate-400 font-mono">
+                    <td className="text-xs text-slate-400 font-mono hidden xl:table-cell whitespace-nowrap">
                       {tx.received_at ? new Date(tx.received_at).toLocaleDateString() : '-'}
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap text-right pr-3">
                       <MoneyDisplay
                         amountMinor={
                           tx.record_type === 'REFUND' || tx.record_type === 'REVERSAL'
@@ -216,18 +216,18 @@ export function TransactionsPage({
                         currency={tx.currency}
                       />
                     </td>
-                    <td>
-                      {tx.net_amount_minor !== undefined && tx.net_amount_minor !== tx.amount_minor ? (
-                        <MoneyDisplay
-                          amountMinor={tx.net_amount_minor}
-                          currency={tx.currency}
-                          className="font-semibold text-emerald-300"
-                        />
-                      ) : (
-                        <span className="text-slate-500 font-mono text-xs">—</span>
-                      )}
+                    <td className="whitespace-nowrap text-right pr-3">
+                      <MoneyDisplay
+                        amountMinor={tx.net_amount_minor !== undefined ? tx.net_amount_minor : tx.amount_minor}
+                        currency={tx.currency}
+                        className={
+                          tx.net_amount_minor !== undefined && tx.net_amount_minor !== tx.amount_minor
+                            ? 'font-semibold text-amber-300'
+                            : 'text-slate-300'
+                        }
+                      />
                     </td>
-                    <td>
+                    <td className="whitespace-nowrap text-right pr-3">
                       {tx.unapplied_cash_minor > 0 ? (
                         <MoneyDisplay
                           amountMinor={tx.unapplied_cash_minor}
@@ -238,8 +238,8 @@ export function TransactionsPage({
                         <span className="text-slate-500 text-xs font-mono">$0.00</span>
                       )}
                     </td>
-                    <td>
-                      <StatusBadge status={tx.reconciliation_status} />
+                    <td className="whitespace-nowrap">
+                      <StatusBadge status={tx.reconciliation_status || 'UNMATCHED'} />
                     </td>
                     <td className="col-sticky-right text-right" onClick={(e) => e.stopPropagation()}>
                       {tx.unapplied_cash_minor > 0 && (
@@ -299,7 +299,7 @@ export function TransactionsPage({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 rounded-lg bg-slate-900 border border-slate-800">
                   <div>
                     <span className="text-[11px] text-slate-400 block mb-1">Reconciliation Status</span>
-                    <StatusBadge status={detail.reconciliation_status} />
+                    <StatusBadge status={detail.reconciliation_status || 'UNMATCHED'} />
                   </div>
                   <div>
                     <span className="text-[11px] text-slate-400 block mb-1">Unapplied Cash</span>
@@ -330,6 +330,34 @@ export function TransactionsPage({
                     />
                   </div>
                 </div>
+
+                {((detail.refund_amount_minor ?? 0) > 0 || (detail.reversal_amount_minor ?? 0) > 0) && (
+                  <div className="p-3.5 rounded-lg bg-slate-900/60 border border-slate-800 space-y-1.5 text-xs">
+                    <span className="font-semibold text-slate-300 uppercase tracking-wider text-[10px] block">
+                      Refund & Reversal Accounting Breakdown
+                    </span>
+                    <div className="flex justify-between text-slate-300">
+                      <span className="text-slate-400">Gross Payment:</span>
+                      <MoneyDisplay amountMinor={detail.amount_minor} currency={detail.currency} />
+                    </div>
+                    {(detail.refund_amount_minor ?? 0) > 0 && (
+                      <div className="flex justify-between text-rose-400">
+                        <span>Associated Refund:</span>
+                        <span>-<MoneyDisplay amountMinor={detail.refund_amount_minor!} currency={detail.currency} className="inline text-rose-400" /></span>
+                      </div>
+                    )}
+                    {(detail.reversal_amount_minor ?? 0) > 0 && (
+                      <div className="flex justify-between text-rose-400">
+                        <span>Dispute Reversal:</span>
+                        <span>-<MoneyDisplay amountMinor={detail.reversal_amount_minor!} currency={detail.currency} className="inline text-rose-400" /></span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-emerald-400 font-semibold pt-1 border-t border-slate-800">
+                      <span>Net Available Cash:</span>
+                      <MoneyDisplay amountMinor={detail.net_amount_minor ?? 0} currency={detail.currency} className="text-emerald-400" />
+                    </div>
+                  </div>
+                )}
 
                 {/* Core Attributes */}
                 <div className="space-y-2 text-xs">

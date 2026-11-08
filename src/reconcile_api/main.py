@@ -985,8 +985,10 @@ def get_dashboard_summary(
                 "currency": c,
                 "payments_amount_minor": 0,
                 "invoices_amount_minor": 0,
+                "invoices_outstanding_minor": 0,
                 "reconciled_amount_minor": 0,
                 "unapplied_cash_minor": 0,
+                "unapplied_amount_minor": 0,
                 "payments_count": 0,
                 "invoices_count": 0,
             }
@@ -1003,6 +1005,7 @@ def get_dashboard_summary(
         bucket["payments_amount_minor"] += p.amount_minor
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
         bucket["unapplied_cash_minor"] += unapplied
+        bucket["unapplied_amount_minor"] += unapplied
         allocated = p.amount_minor - unapplied
         bucket["reconciled_amount_minor"] += allocated
 
@@ -1028,6 +1031,10 @@ def get_dashboard_summary(
         bucket = get_currency_bucket(inv.currency)
         bucket["invoices_count"] += 1
         bucket["invoices_amount_minor"] += inv.total_minor
+        inv_alloc = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
+        inv_sett = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
+        outstanding = max(0, inv.total_minor - (inv_alloc + inv_sett))
+        bucket["invoices_outstanding_minor"] += outstanding
 
     stmt_props = select(ProposalRecord).where(ProposalRecord.tenant_id == effective_tenant)
     proposals = session.scalars(stmt_props).all()
@@ -1067,7 +1074,7 @@ def get_dashboard_summary(
             "open_exceptions": len(open_exceptions_list),
             "total_invoices": len(invoices),
             "total_proposals": len(proposals),
-            "pending_proposals": actionable_proposals,
+            "pending_proposals": pending_proposals,
             "actionable_proposals": actionable_proposals,
             "unresolved_proposals": pending_proposals,
             "approved_proposals": approved_proposals,
@@ -1174,11 +1181,12 @@ def list_transactions(
             rec_type = "PAYMENT"
 
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
+        net_minor = p.amount_minor - refund_minor - reversal_minor
         if unapplied == 0:
             reconciliation_status = "RECONCILED"
         elif p.id in ambiguous_payment_ids:
             reconciliation_status = "AMBIGUOUS"
-        elif unapplied == p.amount_minor:
+        elif unapplied == net_minor:
             reconciliation_status = "UNMATCHED"
         else:
             reconciliation_status = "PARTIALLY_RECONCILED"
@@ -1398,12 +1406,13 @@ def get_transaction(
     else:
         rec_type = "PAYMENT"
 
+    net_minor = p.amount_minor - refund_minor - reversal_minor
     has_ambiguity = any(pr.get("outcome") == "AMBIGUOUS" for pr in prop_list)
     if unapplied == 0:
         reconciliation_status = "RECONCILED"
     elif has_ambiguity:
         reconciliation_status = "AMBIGUOUS"
-    elif unapplied == p.amount_minor:
+    elif unapplied == net_minor:
         reconciliation_status = "UNMATCHED"
     else:
         reconciliation_status = "PARTIALLY_RECONCILED"
@@ -1641,6 +1650,66 @@ def trigger_reconciliation_run(
     }
 
 
+def _enrich_proposal_payload(
+    session: Session,
+    effective_tenant: str,
+    p: ProposalRecord,
+    pay: Optional[PaymentRecord],
+    inv_repo: InvoiceRepository,
+) -> tuple[list[str], Optional[dict[str, Any]]]:
+    evidence: list[str] = json.loads(p.evidence_json) if p.evidence_json else []
+    ambiguity_cert = json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None
+
+    # Currency mismatch detection & authoritative explanation
+    if pay and pay.reference:
+        target_inv = session.scalars(select(InvoiceRecord).where(
+            InvoiceRecord.tenant_id == effective_tenant,
+            or_(
+                InvoiceRecord.provider_invoice_id == pay.reference,
+                InvoiceRecord.invoice_number == pay.reference,
+            ),
+        )).first()
+        if target_inv and target_inv.currency != pay.currency:
+            mismatch_msg = (
+                f"Currency Mismatch: Remittance in {pay.currency} cannot be matched to "
+                f"{target_inv.currency} invoice {target_inv.invoice_number}. "
+                f"Strict currency isolation prevents cross-currency allocations."
+            )
+            if mismatch_msg not in evidence:
+                evidence.append(mismatch_msg)
+
+    # Multi-candidate ambiguity certificate candidate enrichment
+    if ambiguity_cert and "candidate_invoice_ids" in ambiguity_cert:
+        cand_details = []
+        for cid in ambiguity_cert.get("candidate_invoice_ids", []):
+            cinv = session.scalars(select(InvoiceRecord).where(
+                InvoiceRecord.tenant_id == effective_tenant,
+                or_(
+                    InvoiceRecord.id == cid,
+                    InvoiceRecord.provider_invoice_id == cid,
+                    InvoiceRecord.invoice_number == cid,
+                ),
+            )).first()
+            if cinv:
+                cinv_alloc = inv_repo.get_total_allocated_minor(effective_tenant, cinv.id)
+                cinv_sett = inv_repo.get_total_settled_minor(effective_tenant, cinv.id)
+                cand_details.append({
+                    "id": cinv.id,
+                    "invoice_number": cinv.invoice_number,
+                    "provider_invoice_id": cinv.provider_invoice_id,
+                    "customer_name": cinv.customer_name,
+                    "customer_email": cinv.customer_email,
+                    "total_minor": cinv.total_minor,
+                    "currency": cinv.currency,
+                    "outstanding_minor": max(0, cinv.total_minor - (cinv_alloc + cinv_sett)),
+                    "score": ambiguity_cert.get("candidate_scores", {}).get(cid, 0),
+                    "memo": cinv.memo,
+                })
+        ambiguity_cert["candidates_detail"] = cand_details
+
+    return evidence, ambiguity_cert
+
+
 @app.get("/admin/runs/{run_id}", status_code=status.HTTP_200_OK)
 def get_run(
     run_id: str,
@@ -1654,6 +1723,7 @@ def get_run(
 
     run_repo = ReconciliationRunRepository(session)
     prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
     run = run_repo.get_run(effective_tenant, run_id)
     if not run:
         raise HTTPException(
@@ -1676,6 +1746,7 @@ def get_run(
                 "amount_minor": pa.amount_minor,
                 "currency": pa.currency,
             })
+        ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
         proposals_list.append({
             "id": p.id,
             "payment_id": p.payment_id,
@@ -1688,8 +1759,8 @@ def get_run(
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
-            "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
-            "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
+            "evidence": ev,
+            "ambiguity_certificate": ambig,
             "created_at": p.created_at.isoformat() if p.created_at else None,
         })
 
@@ -1722,6 +1793,7 @@ def list_proposals(
     effective_tenant = tenant_id or config.default_tenant_id
 
     prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
     proposals = prop_repo.list_proposals(
         tenant_id=effective_tenant,
         status=status,
@@ -1745,6 +1817,7 @@ def list_proposals(
                 "amount_minor": pa.amount_minor,
                 "currency": pa.currency,
             })
+        ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
         items.append({
             "id": p.id,
             "run_id": p.run_id,
@@ -1758,8 +1831,8 @@ def list_proposals(
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
-            "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
-            "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
+            "evidence": ev,
+            "ambiguity_certificate": ambig,
             "created_at": p.created_at.isoformat() if p.created_at else None,
         })
 
@@ -1783,6 +1856,7 @@ def get_proposal(
     effective_tenant = tenant_id or config.default_tenant_id
 
     prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
     p = prop_repo.get_proposal(effective_tenant, proposal_id)
     if not p:
         raise HTTPException(
@@ -1830,6 +1904,8 @@ def get_proposal(
         for d in decs
     ]
 
+    ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+
     return {
         "id": p.id,
         "tenant_id": p.tenant_id,
@@ -1846,8 +1922,8 @@ def get_proposal(
         "verifications": ver_list,
         "decisions": dec_list,
         "excess_amount_minor": p.excess_amount_minor,
-        "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
-        "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
+        "evidence": ev,
+        "ambiguity_certificate": ambig,
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 

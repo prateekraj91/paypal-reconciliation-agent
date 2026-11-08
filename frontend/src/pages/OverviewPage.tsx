@@ -213,7 +213,10 @@ export function OverviewPage({
                   <span className="font-mono font-bold text-sm text-blue-400 px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40">
                     {curr}
                   </span>
-                  <span className="text-xs text-slate-400">Total Payments: {bucket.payments_count ?? 0}</span>
+                  <div className="flex items-center gap-3 text-xs text-slate-400">
+                    <span>Payments: <strong className="text-slate-200 font-mono">{bucket.payments_count ?? 0}</strong></span>
+                    <span>Invoices: <strong className="text-slate-200 font-mono">{bucket.invoices_count ?? 0}</strong></span>
+                  </div>
                 </div>
                 <div className="space-y-1.5 text-xs">
                   <div className="flex justify-between text-slate-300">
@@ -224,9 +227,13 @@ export function OverviewPage({
                     <span className="text-slate-400">Reconciled to Invoices:</span>
                     <MoneyDisplay amountMinor={bucket.reconciled_amount_minor} currency={curr} className="text-emerald-400" />
                   </div>
+                  <div className="flex justify-between text-slate-300">
+                    <span className="text-slate-400">Invoice Outstanding:</span>
+                    <MoneyDisplay amountMinor={bucket.invoices_outstanding_minor ?? 0} currency={curr} className="text-slate-300" />
+                  </div>
                   <div className="flex justify-between text-slate-300 pt-1.5 border-t border-slate-800">
                     <span className="text-amber-400 font-medium">Unapplied Cash:</span>
-                    <MoneyDisplay amountMinor={bucket.unapplied_cash_minor} currency={curr} className="text-amber-400" />
+                    <MoneyDisplay amountMinor={bucket.unapplied_amount_minor ?? bucket.unapplied_cash_minor} currency={curr} className="text-amber-400" />
                   </div>
                 </div>
               </div>

@@ -99,6 +99,13 @@ def test_02_idempotent_seeding_and_no_auto_approvals(demo_engine):
 
         # Strict safety check: No automatic approvals allowed during setup
         p_repo = PaymentRepository(s)
+        allocated_sum = sum(
+            p_repo.get_total_allocated_minor("demo_merchant", p.id)
+            for p in p_repo.list_payments("demo_merchant")
+        )
+        assert allocated_sum == 0, (
+            "No cash should be allocated during setup; all allocations must remain zero"
+        )
         unapplied_sum = sum(
             p_repo.get_unapplied_cash_minor("demo_merchant", p.id)
             for p in p_repo.list_payments("demo_merchant")
@@ -106,9 +113,8 @@ def test_02_idempotent_seeding_and_no_auto_approvals(demo_engine):
         total_payments_sum = sum(
             p.amount_minor for p in p_repo.list_payments("demo_merchant")
         )
-        assert unapplied_sum == total_payments_sum, (
-            "No cash should be allocated during setup; all payments must remain unapplied"
-        )
+        # Unapplied cash equals total payments net of refunds and reversals
+        assert unapplied_sum == total_payments_sum - 10000 - 45000
 
 
 def test_03_synthetic_scenarios_and_demo_labels(demo_engine):
