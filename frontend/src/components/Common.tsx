@@ -6,9 +6,12 @@ import { VerifierStatus, ReconciliationStatus, DecisionStatus } from '../types/a
  * Format integer minor units (e.g. cents) to currency string.
  */
 export function formatMoney(amountMinor: number, currency: string = 'USD'): string {
-  const major = amountMinor / 100;
+  const isNegative = amountMinor < 0;
+  const absMinor = Math.abs(amountMinor);
+  const major = absMinor / 100;
   const symbol = currency.toUpperCase() === 'EUR' ? '€' : currency.toUpperCase() === 'GBP' ? '£' : '$';
-  return `${symbol}${major.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency.toUpperCase()}`;
+  const prefix = isNegative ? '-' : '';
+  return `${prefix}${symbol}${major.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency.toUpperCase()}`;
 }
 
 export function MoneyDisplay({
@@ -20,8 +23,9 @@ export function MoneyDisplay({
   currency?: string;
   className?: string;
 }) {
+  const isNegative = amountMinor < 0;
   return (
-    <span className={`font-mono font-medium tracking-tight ${className}`}>
+    <span className={`font-mono font-medium tracking-tight ${isNegative ? 'text-rose-400' : ''} ${className}`}>
       {formatMoney(amountMinor, currency)}
     </span>
   );
@@ -35,6 +39,15 @@ export function StatusBadge({ status }: { status: string }) {
       <span className="badge badge-reconciled">
         <CheckCircle2 size={12} />
         {s === 'FULLY_RECONCILED' ? 'RECONCILED' : s}
+      </span>
+    );
+  }
+
+  if (s === 'AMBIGUOUS') {
+    return (
+      <span className="badge badge-ambiguous">
+        <AlertTriangle size={12} className="text-amber-400" />
+        AMBIGUOUS
       </span>
     );
   }
@@ -66,7 +79,37 @@ export function StatusBadge({ status }: { status: string }) {
     );
   }
 
-  return <span className="badge badge-neutral">{s}</span>;
+  return <span className="badge badge-neutral">{s || '—'}</span>;
+}
+
+export function RecordTypeBadge({ recordType }: { recordType: string }) {
+  const rt = (recordType || 'PAYMENT').toUpperCase();
+  if (rt === 'REFUND') {
+    return (
+      <span className="badge badge-refund font-mono">
+        REFUND
+      </span>
+    );
+  }
+  if (rt === 'REVERSAL') {
+    return (
+      <span className="badge badge-reversal font-mono">
+        REVERSAL
+      </span>
+    );
+  }
+  if (rt === 'SETTLEMENT') {
+    return (
+      <span className="badge badge-settlement font-mono">
+        SETTLEMENT
+      </span>
+    );
+  }
+  return (
+    <span className="badge badge-payment font-mono">
+      PAYMENT
+    </span>
+  );
 }
 
 export function VerifierStatusBadge({ status }: { status: VerifierStatus | string }) {

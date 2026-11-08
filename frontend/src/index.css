@@ -93,19 +93,25 @@ code, .font-mono {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
-.badge-partial, .badge-needs-review, .badge-warning, .badge-pending {
+.badge-partial, .badge-needs-review, .badge-warning, .badge-pending, .badge-ambiguous {
   background-color: rgba(245, 158, 11, 0.12);
   color: #fbbf24;
   border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
-.badge-info, .badge-ai {
+.badge-info, .badge-ai, .badge-settlement {
   background-color: rgba(139, 92, 246, 0.12);
   color: #a78bfa;
   border: 1px solid rgba(139, 92, 246, 0.3);
 }
 
-.badge-neutral {
+.badge-refund, .badge-reversal {
+  background-color: rgba(244, 63, 94, 0.12);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+.badge-neutral, .badge-payment {
   background-color: rgba(148, 163, 184, 0.1);
   color: #cbd5e1;
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -145,6 +151,19 @@ code, .font-mono {
 .fintech-table tbody tr:hover {
   background-color: var(--bg-hover);
   cursor: pointer;
+}
+
+/* Sticky Action Column for Responsive Tables */
+.col-sticky-right {
+  position: sticky;
+  right: 0;
+  background-color: var(--bg-surface);
+  box-shadow: -4px 0 8px -2px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+}
+
+.fintech-table tbody tr:hover .col-sticky-right {
+  background-color: var(--bg-hover);
 }
 
 /* Cards */

@@ -47,6 +47,7 @@ from .canonical import canonical_json
 
 from reconcile.interfaces import Matcher
 from reconcile.deterministic import DeterministicMatcher
+from reconcile.advanced import AdvancedMatcher
 from reconcile.models import (
     Invoice,
     Payment,
@@ -435,7 +436,12 @@ class StorageWorkflow:
 
         Crucially: proposals are NEVER automatically approved.
         """
-        active_matcher = matcher or DeterministicMatcher()
+        if matcher:
+            active_matcher = matcher
+        elif matcher_name in ("deterministic_v2", "advanced-matcher-d5", "advanced_v2", "advanced"):
+            active_matcher = AdvancedMatcher()
+        else:
+            active_matcher = DeterministicMatcher()
 
         # Load invoices and payments from the store
         db_invoices = list(self.invoice_repo.list_invoices(tenant_id))
@@ -451,6 +457,22 @@ class StorageWorkflow:
                 matcher_version=matcher_version,
                 summary_metrics={"total_payments": len(db_payments), "total_invoices": len(db_invoices)},
                 config_snapshot=config_snapshot,
+            )
+            self.audit_repo.append_event(
+                tenant_id=tenant_id,
+                event_type="RECONCILIATION_RUN_COMPLETED",
+                actor=f"matcher:{matcher_name}",
+                subject_type="reconciliation_run",
+                subject_id=run_rec.id,
+                details={
+                    "matcher_name": matcher_name,
+                    "matcher_version": matcher_version,
+                    "input_snapshot_id": snapshot_hash,
+                    "total_payments": len(db_payments),
+                    "total_invoices": len(db_invoices),
+                    "proposals_generated": 0,
+                    "verified_proposals": 0,
+                },
             )
             self.session.commit()
             empty_result = ReconciliationRunResult(
@@ -568,7 +590,7 @@ class StorageWorkflow:
 
             # Prepare proposal allocations
             alloc_payloads: List[Dict[str, Any]] = []
-            if prop.candidates:
+            if prop.outcome == MatchOutcome.PROPOSED and prop.candidates:
                 candidate = prop.candidates[0]
                 for ca in candidate.allocations:
                     db_inv_id = inv_map.get(ca.invoice_id)
@@ -580,10 +602,10 @@ class StorageWorkflow:
                             "evidence": [e.code.value for e in candidate.evidence] if candidate.evidence else [],
                         })
 
-            if prop.candidates and prop.candidates[0].evidence:
-                prop_evidence = [e.code.value for e in prop.candidates[0].evidence]
-            elif prop.reasons:
-                prop_evidence = [e.code.value for e in prop.reasons]
+            if prop.reasons:
+                prop_evidence = [e.code.value if hasattr(e, "code") else str(e) for e in prop.reasons]
+            elif prop.candidates and prop.candidates[0].evidence:
+                prop_evidence = [e.code.value if hasattr(e, "code") else str(e) for e in prop.candidates[0].evidence]
             else:
                 prop_evidence = []
             prop_rec = self.proposal_repo.create_proposal(
@@ -610,6 +632,24 @@ class StorageWorkflow:
                     failure_reason="; ".join(ver_result.issues) if ver_result.issues else None,
                     source_hashes={"snapshot_hash": snapshot_hash},
                 )
+
+        # Record tamper-evident audit event for reconciliation run execution
+        self.audit_repo.append_event(
+            tenant_id=tenant_id,
+            event_type="RECONCILIATION_RUN_COMPLETED",
+            actor=f"matcher:{matcher_name}",
+            subject_type="reconciliation_run",
+            subject_id=run_rec.id,
+            details={
+                "matcher_name": matcher_name,
+                "matcher_version": matcher_version,
+                "input_snapshot_id": snapshot_hash,
+                "total_payments": len(domain_payments),
+                "total_invoices": len(domain_invoices),
+                "proposals_generated": len(run_result.proposals),
+                "verified_proposals": sum(1 for v in run_result.verification_results if v.passed),
+            },
+        )
 
         self.session.commit()
         return run_rec, run_result

@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { TransactionItem, TransactionDetail } from '../types/api';
-import { MoneyDisplay, StatusBadge, VerifierStatusBadge, HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { MoneyDisplay, StatusBadge, RecordTypeBadge, VerifierStatusBadge, HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { getTransactionEmptyLabels } from '../utils/formatters';
 
 export function TransactionsPage({
@@ -32,6 +32,7 @@ export function TransactionsPage({
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [currencyFilter, setCurrencyFilter] = useState('ALL');
+  const [recordTypeFilter, setRecordTypeFilter] = useState('ALL');
 
   // Drawer / Detail state
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
@@ -45,6 +46,7 @@ export function TransactionsPage({
         tenantId,
         status: statusFilter === 'ALL' ? undefined : statusFilter,
         currency: currencyFilter === 'ALL' ? undefined : currencyFilter,
+        record_type: recordTypeFilter === 'ALL' ? undefined : recordTypeFilter,
         search: search.trim() || undefined,
         limit: 100,
       });
@@ -59,7 +61,7 @@ export function TransactionsPage({
 
   useEffect(() => {
     fetchTransactions();
-  }, [tenantId, statusFilter, currencyFilter]);
+  }, [tenantId, statusFilter, currencyFilter, recordTypeFilter]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,6 +119,17 @@ export function TransactionsPage({
 
         <div className="flex items-center gap-2">
           <select
+            value={recordTypeFilter}
+            onChange={(e) => setRecordTypeFilter(e.target.value)}
+            className="select-input text-xs w-auto py-2 bg-slate-900 border-slate-700"
+          >
+            <option value="ALL">All Record Types</option>
+            <option value="PAYMENT">Payments Only</option>
+            <option value="REFUND">Refunds</option>
+            <option value="REVERSAL">Disputes & Reversals</option>
+          </select>
+
+          <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             className="select-input text-xs w-auto py-2 bg-slate-900 border-slate-700"
@@ -156,13 +169,15 @@ export function TransactionsPage({
             <table className="fintech-table">
               <thead>
                 <tr>
+                  <th>Type</th>
                   <th>Payment ID</th>
                   <th>Payer</th>
                   <th>Received Date</th>
-                  <th>Total Amount</th>
+                  <th>Gross Amount</th>
+                  <th>Net Amount</th>
                   <th>Unapplied Cash</th>
                   <th>Reconciliation State</th>
-                  <th>Actions</th>
+                  <th className="col-sticky-right text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -172,6 +187,9 @@ export function TransactionsPage({
                     onClick={() => openDetail(tx.provider_payment_id)}
                     className="cursor-pointer"
                   >
+                    <td>
+                      <RecordTypeBadge recordType={tx.record_type || 'PAYMENT'} />
+                    </td>
                     <td>
                       <span className="font-mono text-xs text-blue-400 font-medium">
                         {tx.provider_payment_id}
@@ -189,7 +207,25 @@ export function TransactionsPage({
                       {tx.received_at ? new Date(tx.received_at).toLocaleDateString() : '-'}
                     </td>
                     <td>
-                      <MoneyDisplay amountMinor={tx.amount_minor} currency={tx.currency} />
+                      <MoneyDisplay
+                        amountMinor={
+                          tx.record_type === 'REFUND' || tx.record_type === 'REVERSAL'
+                            ? -Math.abs(tx.amount_minor)
+                            : tx.amount_minor
+                        }
+                        currency={tx.currency}
+                      />
+                    </td>
+                    <td>
+                      {tx.net_amount_minor !== undefined && tx.net_amount_minor !== tx.amount_minor ? (
+                        <MoneyDisplay
+                          amountMinor={tx.net_amount_minor}
+                          currency={tx.currency}
+                          className="font-semibold text-emerald-300"
+                        />
+                      ) : (
+                        <span className="text-slate-500 font-mono text-xs">—</span>
+                      )}
                     </td>
                     <td>
                       {tx.unapplied_cash_minor > 0 ? (
@@ -205,11 +241,11 @@ export function TransactionsPage({
                     <td>
                       <StatusBadge status={tx.reconciliation_status} />
                     </td>
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <td className="col-sticky-right text-right" onClick={(e) => e.stopPropagation()}>
                       {tx.unapplied_cash_minor > 0 && (
                         <button
                           onClick={() => onStartInvestigation(tx.provider_payment_id)}
-                          className="btn btn-secondary py-1 px-2.5 text-[11px] text-violet-300 border-violet-800/40 hover:bg-violet-950/40 flex items-center gap-1.5"
+                          className="btn btn-secondary py-1 px-2.5 text-[11px] text-violet-300 border-violet-800/40 hover:bg-violet-950/40 inline-flex items-center gap-1.5"
                         >
                           <Sparkles size={11} />
                           Investigate
@@ -237,9 +273,12 @@ export function TransactionsPage({
             {/* Drawer Header */}
             <div className="flex items-start justify-between pb-4 border-b border-slate-800">
               <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                  Transaction Detail
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                    Transaction Detail
+                  </span>
+                  {detail && <RecordTypeBadge recordType={detail.record_type || 'PAYMENT'} />}
+                </div>
                 <h3 className="text-lg font-bold font-mono text-white mt-0.5">
                   {selectedTxId}
                 </h3>
@@ -257,7 +296,7 @@ export function TransactionsPage({
             ) : (
               <div className="space-y-6">
                 {/* Status & Unapplied Cash Banner */}
-                <div className="grid grid-cols-2 gap-3 p-4 rounded-lg bg-slate-900 border border-slate-800">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 rounded-lg bg-slate-900 border border-slate-800">
                   <div>
                     <span className="text-[11px] text-slate-400 block mb-1">Reconciliation Status</span>
                     <StatusBadge status={detail.reconciliation_status} />
@@ -267,7 +306,27 @@ export function TransactionsPage({
                     <MoneyDisplay
                       amountMinor={detail.unapplied_cash_minor}
                       currency={detail.currency}
-                      className={detail.unapplied_cash_minor > 0 ? 'text-amber-400 text-sm' : 'text-slate-400 text-sm'}
+                      className={detail.unapplied_cash_minor > 0 ? 'text-amber-400 text-sm font-semibold' : 'text-slate-400 text-sm'}
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-slate-400 block mb-1">Gross Ingested</span>
+                    <MoneyDisplay
+                      amountMinor={
+                        detail.record_type === 'REFUND' || detail.record_type === 'REVERSAL'
+                          ? -Math.abs(detail.amount_minor)
+                          : detail.amount_minor
+                      }
+                      currency={detail.currency}
+                      className="text-slate-200 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-slate-400 block mb-1">Net Balance</span>
+                    <MoneyDisplay
+                      amountMinor={detail.net_amount_minor ?? detail.amount_minor}
+                      currency={detail.currency}
+                      className="text-emerald-400 text-sm font-semibold"
                     />
                   </div>
                 </div>
@@ -278,6 +337,10 @@ export function TransactionsPage({
                     Payment Details
                   </h4>
                   <div className="p-3.5 rounded-lg bg-slate-900/60 border border-slate-800/80 space-y-2">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Record Type:</span>
+                      <span className="text-slate-200 font-mono font-medium">{detail.record_type || 'PAYMENT'}</span>
+                    </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">Payer Name:</span>
                       <span className="text-slate-200 font-medium">{detail.payer_name || '-'}</span>
@@ -303,6 +366,83 @@ export function TransactionsPage({
                       </div>
                     )}
                   </div>
+                </div>
+
+                {/* Dedicated Associated Refunds & Disputes Section */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                      <FileText size={12} className="text-rose-400" />
+                      Associated Refunds & Disputes ({detail.refunds ? detail.refunds.length : 0})
+                    </h4>
+                  </div>
+                  {(!detail.refunds || detail.refunds.length === 0) ? (
+                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                      Zero associated refunds or chargeback disputes for this transaction.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {detail.refunds.map((ref) => (
+                        <div
+                          key={ref.id}
+                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center text-xs"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <RecordTypeBadge recordType={ref.record_type || 'REFUND'} />
+                              <span className="font-mono text-rose-300 font-medium">{ref.provider_refund_id}</span>
+                            </div>
+                            {ref.reason && (
+                              <span className="text-[11px] text-slate-400 block mt-1">{ref.reason}</span>
+                            )}
+                            {ref.dispute_id && (
+                              <span className="text-[11px] text-amber-400 font-mono block mt-0.5">Dispute Case: {ref.dispute_id}</span>
+                            )}
+                            <span className="text-[10px] text-slate-500 block mt-0.5">
+                              Processed {ref.refunded_at ? new Date(ref.refunded_at).toLocaleDateString() : '-'}
+                            </span>
+                          </div>
+                          <MoneyDisplay amountMinor={-Math.abs(ref.amount_minor)} currency={ref.currency} className="text-rose-400 font-bold" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Dedicated Settlement Batch References Section */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                      <Clock size={12} className="text-violet-400" />
+                      Settlement Batch References ({detail.settlements ? detail.settlements.length : 0})
+                    </h4>
+                  </div>
+                  {(!detail.settlements || detail.settlements.length === 0) ? (
+                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                      Zero settlement batch events recorded for this transaction.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {detail.settlements.map((st) => (
+                        <div
+                          key={st.id}
+                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center text-xs"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <RecordTypeBadge recordType="SETTLEMENT" />
+                              <span className="font-mono text-violet-300 font-medium">{st.provider_settlement_id}</span>
+                            </div>
+                            <span className="text-[11px] text-slate-400 block mt-1">Invoice: {st.invoice_number}</span>
+                            <span className="text-[10px] text-slate-500 block mt-0.5">
+                              Settled {st.settled_at ? new Date(st.settled_at).toLocaleDateString() : '-'}
+                            </span>
+                          </div>
+                          <MoneyDisplay amountMinor={st.amount_minor} currency={st.currency} className="text-violet-300 font-semibold" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Approved Allocations */}
