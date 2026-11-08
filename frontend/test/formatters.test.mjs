@@ -142,6 +142,14 @@ test('getMatcherExplanation distinguishes reason categories instead of generic n
   assert.strictEqual(currMismatch.badgeLabel, 'Currency Mismatch');
   assert.ok(currMismatch.summary.includes('Currency mismatch'));
 
+  const detailedMismatch = getMatcherExplanation('NO_MATCH', [
+    'CURRENCY_MISMATCH',
+    'Currency Mismatch: Remittance in USD cannot be matched to EUR invoice INV-DEMO-EUR-009. Strict currency isolation prevents cross-currency allocations.',
+  ]);
+  assert.strictEqual(detailedMismatch.category, 'currency_mismatch');
+  assert.strictEqual(detailedMismatch.badgeLabel, 'Currency Mismatch');
+  assert.ok(detailedMismatch.summary.includes('INV-DEMO-EUR-009'));
+
   // 3. Amount mismatch (overpayment)
   const overpay = getMatcherExplanation('AMOUNT_OVERPAYMENT', ['Payment 15000 exceeds invoice 10000'], 5000);
   assert.strictEqual(overpay.category, 'overpayment');
@@ -150,8 +158,13 @@ test('getMatcherExplanation distinguishes reason categories instead of generic n
 
   // 4. Amount mismatch (partial / underpayment)
   const underpay = getMatcherExplanation('AMOUNT_UNDERPAYMENT', ['Payment 30000 partially satisfies 60000']);
-  assert.strictEqual(underpay.category, 'amount_mismatch');
-  assert.strictEqual(underpay.badgeLabel, 'Amount Mismatch (Partial)');
+  assert.strictEqual(underpay.category, 'partial');
+  assert.strictEqual(underpay.badgeLabel, 'Partial Payment');
+
+  const partialPay = getMatcherExplanation('PROPOSED', ['REFERENCE_MATCH', 'AMOUNT_PARTIAL']);
+  assert.strictEqual(partialPay.category, 'partial');
+  assert.strictEqual(partialPay.badgeLabel, 'Partial Payment');
+  assert.ok(partialPay.summary.includes('Partial payment'));
 
   // 5. Insufficient corroboration
   const unverified = getMatcherExplanation('UNVERIFIED', ['Candidate found but verifier rejected single-signal match']);

@@ -172,7 +172,7 @@ export function validateHeaderValue(name: string, value: string): void {
 
 export interface MatcherExplanation {
   badgeLabel: string;
-  category: 'exact' | 'ambiguous' | 'overpayment' | 'amount_mismatch' | 'currency_mismatch' | 'insufficient_corroboration' | 'no_candidates' | 'split';
+  category: 'exact' | 'ambiguous' | 'overpayment' | 'amount_mismatch' | 'partial' | 'currency_mismatch' | 'insufficient_corroboration' | 'no_candidates' | 'split';
   summary: string;
   details: string[];
 }
@@ -194,8 +194,14 @@ export function getMatcherExplanation(
   const evText = ev.join(' ').toLowerCase();
 
   // 1. Multiple competing candidates / Ambiguity
-  if (norm.includes('AMBIGUOUS') || ambiguityCert || norm === 'COMPETING_INVOICES') {
-    const candCount = ambiguityCert?.candidate_invoices?.length || ambiguityCert?.candidates?.length || 2;
+  if (
+    norm.includes('AMBIGUOUS') ||
+    ambiguityCert ||
+    norm === 'COMPETING_INVOICES' ||
+    evText.includes('competing') ||
+    evText.includes('multiple_candidates')
+  ) {
+    const candCount = ambiguityCert?.candidate_invoice_ids?.length || ambiguityCert?.candidate_invoices?.length || ambiguityCert?.candidates?.length || 2;
     return {
       badgeLabel: 'Multiple Competing Candidates',
       category: 'ambiguous',
@@ -205,16 +211,25 @@ export function getMatcherExplanation(
   }
 
   // 2. Currency mismatch
-  if (norm.includes('CURRENCY_MISMATCH') || evText.includes('currency mismatch') || evText.includes('currency')) {
+  if (
+    norm.includes('CURRENCY_MISMATCH') ||
+    norm.includes('CURRENCY') ||
+    evText.includes('currency_mismatch') ||
+    evText.includes('currency mismatch') ||
+    evText.includes('currency')
+  ) {
+    const detailedMismatch = details.find(
+      (d) => typeof d === 'string' && d.toLowerCase().includes('currency mismatch:')
+    );
     return {
       badgeLabel: 'Currency Mismatch',
       category: 'currency_mismatch',
-      summary: 'Currency mismatch (payment currency differs from candidate invoice currency)',
+      summary: detailedMismatch || 'Currency mismatch (payment currency differs from candidate invoice currency)',
       details: details.length > 0 ? details : ['Payment and invoice currencies differ; cross-currency auto-settlement is restricted.'],
     };
   }
 
-  // 3. Overpayment / Underpayment / Split
+  // 3. Overpayment / Underpayment / Partial / Split
   if (norm.includes('OVERPAYMENT') || (excessMinor && excessMinor > 0) || evText.includes('excess') || evText.includes('overpayment')) {
     const diff = excessMinor ? ` by $${(excessMinor / 100).toFixed(2)}` : '';
     return {
@@ -225,7 +240,20 @@ export function getMatcherExplanation(
     };
   }
 
-  if (norm.includes('UNDERPAYMENT') || norm.includes('PARTIAL') || evText.includes('underpayment') || evText.includes('partial')) {
+  if (
+    norm.includes('PARTIAL') ||
+    evText.includes('amount_partial') ||
+    evText.includes('partial')
+  ) {
+    return {
+      badgeLabel: 'Partial Payment',
+      category: 'partial',
+      summary: 'Partial payment: Remittance partially satisfies invoice; remaining balance remains open.',
+      details: details.length > 0 ? details : ['Payment amount partially satisfies open invoice balance.'],
+    };
+  }
+
+  if (norm.includes('UNDERPAYMENT') || evText.includes('underpayment')) {
     return {
       badgeLabel: 'Amount Mismatch (Partial)',
       category: 'amount_mismatch',

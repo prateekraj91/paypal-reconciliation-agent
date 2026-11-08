@@ -334,3 +334,110 @@ def test_frontend_spa_serving(client):
     assert "text/html" in resp.headers.get("content-type", "")
     assert "<div id=\"root\"></div>" in resp.text
 
+
+def test_per_currency_totals_and_outstanding_accounting(client):
+    """Verify independent calculations of payment/invoice counts and amounts per currency bucket."""
+    client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
+
+    resp = client.get("/admin/dashboard/summary?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Counts
+    counts = data["counts"]
+    assert counts["total_payments"] == 11
+    assert counts["actionable_proposals"] == 8
+    assert counts["unresolved_proposals"] == 11
+
+    # USD bucket
+    totals = data["financial_totals"]
+    assert "USD" in totals
+    usd = totals["USD"]
+    assert usd["currency"] == "USD"
+    assert usd["payments_count"] == 11
+    assert usd["invoices_count"] == 11
+    assert usd["payments_amount_minor"] == 791000
+    assert usd["invoices_amount_minor"] == 819000
+    assert usd["invoices_outstanding_minor"] == 819000
+    assert usd["unapplied_cash_minor"] == 736000
+    assert usd["unapplied_amount_minor"] == 736000
+
+    # EUR bucket
+    assert "EUR" in totals
+    eur = totals["EUR"]
+    assert eur["currency"] == "EUR"
+    assert eur["payments_count"] == 0
+    assert eur["invoices_count"] == 1
+    assert eur["payments_amount_minor"] == 0
+    assert eur["invoices_amount_minor"] == 75000
+    assert eur["invoices_outstanding_minor"] == 75000
+    assert eur["unapplied_cash_minor"] == 0
+    assert eur["unapplied_amount_minor"] == 0
+
+
+def test_refund_and_reversal_net_unapplied_cash_accounting(client):
+    """Verify refunds and reversals reduce unapplied cash on parent transactions to prevent phantom unapplied cash."""
+    client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
+
+    # List transactions
+    resp = client.get("/admin/transactions?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    txs = {t["provider_payment_id"]: t for t in resp.json()["transactions"]}
+
+    # PAY-DEMO-REFUND-007: Gross $300.00, Refund -$100.00, Net Settled $200.00, Unapplied $200.00
+    ref_tx = txs["PAY-DEMO-REFUND-007"]
+    assert ref_tx["amount_minor"] == 30000
+    assert ref_tx["refund_amount_minor"] == 10000
+    assert ref_tx["net_amount_minor"] == 20000
+    assert ref_tx["unapplied_cash_minor"] == 20000
+    assert ref_tx["reconciliation_status"] == "UNMATCHED"
+
+    # PAY-DEMO-REVERSAL-008: Gross $450.00, Reversal -$450.00, Net Settled $0.00, Unapplied $0.00
+    rev_tx = txs["PAY-DEMO-REVERSAL-008"]
+    assert rev_tx["amount_minor"] == 45000
+    assert rev_tx["reversal_amount_minor"] == 45000
+    assert rev_tx["net_amount_minor"] == 0
+    assert rev_tx["unapplied_cash_minor"] == 0
+    assert rev_tx["reconciliation_status"] == "RECONCILED"
+
+    # Transaction detail endpoint guarantees
+    resp_detail = client.get("/admin/transactions/PAY-DEMO-REVERSAL-008?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp_detail.status_code == 200
+    detail = resp_detail.json()
+    assert detail["reconciliation_status"] == "RECONCILED"
+    assert detail["net_amount_minor"] == 0
+    assert detail["unapplied_cash_minor"] == 0
+
+
+def test_currency_mismatch_and_ambiguity_enrichment(client):
+    """Verify currency mismatch has authoritative isolation message and ambiguity certificates include candidate details."""
+    client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
+
+    resp = client.get("/admin/proposals?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    props = {p["provider_payment_id"]: p for p in resp.json()["proposals"]}
+
+    # Currency mismatch
+    curr_prop = props["PAY-DEMO-CURR-MISMATCH-009"]
+    assert curr_prop["outcome"] == "NO_MATCH"
+    evidence_str = " ".join(curr_prop["evidence"])
+    assert "CURRENCY_MISMATCH" in evidence_str
+    assert "INV-DEMO-EUR-009" in evidence_str
+    assert "Strict currency isolation prevents cross-currency allocations" in evidence_str
+
+    # Competing candidates ambiguity certificate
+    comp_prop = props["PAY-DEMO-COMPETING-003"]
+    assert comp_prop["outcome"] == "AMBIGUOUS"
+    cert = comp_prop["ambiguity_certificate"]
+    assert cert is not None
+    assert "candidates_detail" in cert
+    assert len(cert["candidates_detail"]) == 2
+    cands = {c["invoice_number"]: c for c in cert["candidates_detail"]}
+    assert "INV-DEMO-COMPETE-3A" in cands
+    assert "INV-DEMO-COMPETE-3B" in cands
+    assert cands["INV-DEMO-COMPETE-3A"]["total_minor"] == 40000
+    assert cands["INV-DEMO-COMPETE-3A"]["score"] == 120
+    assert cands["INV-DEMO-COMPETE-3B"]["total_minor"] == 40000
+    assert cands["INV-DEMO-COMPETE-3B"]["score"] == 120
+
+

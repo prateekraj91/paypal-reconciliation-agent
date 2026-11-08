@@ -30,11 +30,13 @@ export interface DashboardSummary {
     string,
     {
       currency: string;
-      payments_count?: number;
-      invoices_count?: number;
+      payments_count: number;
+      invoices_count: number;
       payments_amount_minor: number;
       invoices_amount_minor: number;
+      invoices_outstanding_minor?: number;
       reconciled_amount_minor: number;
+      unapplied_amount_minor?: number;
       unapplied_cash_minor: number;
     }
   >;

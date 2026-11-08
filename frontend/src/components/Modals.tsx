@@ -499,16 +499,83 @@ export function EvidenceInspectModal({
 
         {/* Ambiguity Certificate (if competing invoices conflict) */}
         {proposal.ambiguity_certificate && (
-          <div className="p-3.5 rounded-lg bg-amber-950/20 border border-amber-500/30 space-y-2 text-xs">
-            <span className="font-semibold text-amber-300 uppercase tracking-wider text-[10px] block">
-              Ambiguity Certificate (Multi-Candidate Conflict)
-            </span>
+          <div className="p-3.5 rounded-lg bg-amber-950/20 border border-amber-500/30 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-amber-300 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                <AlertTriangle size={12} className="text-amber-400" />
+                Ambiguity Certificate (Multi-Candidate Conflict)
+              </span>
+              <span className="badge badge-ambiguous text-[10px]">
+                HUMAN DISAMBIGUATION REQUIRED
+              </span>
+            </div>
             <p className="text-amber-200/90 text-xs">
-              Multiple competing invoices matched with identical confidence. Allocation withheld to prevent misapplication of customer funds.
+              Multiple competing invoices matched with identical confidence. Automated allocation is withheld to prevent misapplication of customer funds.
             </p>
-            <pre className="p-2 rounded bg-slate-950 font-mono text-[11px] text-amber-300 overflow-x-auto">
-              {JSON.stringify(proposal.ambiguity_certificate, null, 2)}
-            </pre>
+
+            {/* Structured Candidates Comparison */}
+            {proposal.ambiguity_certificate.candidates_detail && proposal.ambiguity_certificate.candidates_detail.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-semibold text-slate-300 block">
+                  Competing Invoice Candidates:
+                </span>
+                <div className="overflow-x-auto rounded border border-slate-800 bg-slate-950/80">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-[11px] text-slate-400 bg-slate-900/50">
+                        <th className="py-2 px-2.5">Invoice</th>
+                        <th className="py-2 px-2.5">Customer</th>
+                        <th className="py-2 px-2.5 text-right">Total</th>
+                        <th className="py-2 px-2.5 text-right">Outstanding</th>
+                        <th className="py-2 px-2.5 text-right">Score</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
+                      {proposal.ambiguity_certificate.candidates_detail.map((c: any) => (
+                        <tr key={c.id || c.invoice_number} className="hover:bg-slate-900/40">
+                          <td className="py-2 px-2.5 text-blue-400 font-semibold">
+                            {c.invoice_number}
+                            {c.memo && <span className="block text-[10px] text-slate-500 font-sans truncate max-w-[180px]">{c.memo}</span>}
+                          </td>
+                          <td className="py-2 px-2.5 text-slate-300 font-sans">{c.customer_name}</td>
+                          <td className="py-2 px-2.5 text-right text-slate-300">
+                            <MoneyDisplay amountMinor={c.total_minor} currency={c.currency} />
+                          </td>
+                          <td className="py-2 px-2.5 text-right text-amber-300">
+                            <MoneyDisplay amountMinor={c.outstanding_minor} currency={c.currency} />
+                          </td>
+                          <td className="py-2 px-2.5 text-right font-bold text-violet-300">{c.score}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Recommended Operator Steps */}
+            {proposal.ambiguity_certificate.recommended_steps && (
+              <div className="space-y-1 pt-1">
+                <span className="text-[10px] uppercase font-bold text-amber-400/90 tracking-wider block">
+                  Recommended Disambiguation Steps:
+                </span>
+                <ul className="list-disc list-inside space-y-0.5 text-slate-300 text-[11px]">
+                  {proposal.ambiguity_certificate.recommended_steps.map((step: string, idx: number) => (
+                    <li key={idx} className="leading-relaxed">{step}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Collapsible Raw Certificate */}
+            <details className="pt-1">
+              <summary className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer font-sans select-none">
+                View Raw Ambiguity Certificate JSON
+              </summary>
+              <pre className="mt-2 p-2 rounded bg-slate-950 font-mono text-[10px] text-amber-300/80 overflow-x-auto max-h-48">
+                {JSON.stringify(proposal.ambiguity_certificate, null, 2)}
+              </pre>
+            </details>
           </div>
         )}
 
