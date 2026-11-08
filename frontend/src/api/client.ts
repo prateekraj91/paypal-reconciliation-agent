@@ -15,6 +15,7 @@ import {
   AuditEventItem,
   AuditVerifyResponse,
 } from '../types/api';
+import { validateHeaderValue } from '../utils/formatters';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
@@ -32,8 +33,14 @@ class ApiClient {
     return this.tenantId;
   }
 
+  public static validateHeaderValue(name: string, value: string): void {
+    validateHeaderValue(name, value);
+  }
+
   public setApiKey(key: string) {
-    this.apiKey = key.trim();
+    const trimmed = key.trim();
+    ApiClient.validateHeaderValue('Authorization', trimmed);
+    this.apiKey = trimmed;
   }
 
   public clearApiKey() {
@@ -123,6 +130,7 @@ class ApiClient {
     status?: string;
     currency?: string;
     search?: string;
+    record_type?: string;
     limit?: number;
     offset?: number;
   } = {}): Promise<{ transactions: TransactionItem[]; total_count: number }> {
@@ -131,6 +139,7 @@ class ApiClient {
     if (params.status) query.set('status', params.status);
     if (params.currency) query.set('currency', params.currency);
     if (params.search) query.set('search', params.search);
+    if (params.record_type) query.set('record_type', params.record_type);
     if (params.limit) query.set('limit', params.limit.toString());
     if (params.offset) query.set('offset', params.offset.toString());
     return this.request(`/admin/transactions?${query.toString()}`);

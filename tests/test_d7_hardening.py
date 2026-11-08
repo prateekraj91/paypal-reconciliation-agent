@@ -744,7 +744,7 @@ def test_repeated_demo_seed_behavior(client, test_db):
         investigations = s.query(InvestigationRecord).filter_by(tenant_id="demo_merchant").all()
         allocations = s.query(AllocationRecord).filter_by(tenant_id="demo_merchant").all()
 
-        assert len(payments) == 6
-        assert len(invoices) == 6
+        assert len(payments) == 11
+        assert len(invoices) == 12
         assert len(investigations) == 2
-        assert len(allocations) == 1  # exactly 1 approved allocation from seed
+        assert len(allocations) == 0  # zero automatic approvals during setup per safety invariant

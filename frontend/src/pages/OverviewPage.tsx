@@ -153,8 +153,12 @@ export function OverviewPage({
             </div>
           </div>
           <div className="mt-3 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-blue-300">{counts.pending_proposals}</span>
-            <span className="text-xs text-slate-400 font-medium">proposals pending approval</span>
+            <span className="text-2xl font-bold font-mono text-blue-300">
+              {counts.actionable_proposals !== undefined ? counts.actionable_proposals : counts.pending_proposals}
+            </span>
+            <span className="text-xs text-slate-400 font-medium">
+              actionable ({counts.unresolved_proposals ?? counts.pending_proposals} unresolved)
+            </span>
           </div>
           <p className="text-[11px] text-slate-400 mt-3 flex items-center gap-1">
             <span>Human-in-the-loop decisions</span>
@@ -209,7 +213,7 @@ export function OverviewPage({
                   <span className="font-mono font-bold text-sm text-blue-400 px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40">
                     {curr}
                   </span>
-                  <span className="text-xs text-slate-400">Total Payments: {counts.total_payments}</span>
+                  <span className="text-xs text-slate-400">Total Payments: {bucket.payments_count ?? 0}</span>
                 </div>
                 <div className="space-y-1.5 text-xs">
                   <div className="flex justify-between text-slate-300">

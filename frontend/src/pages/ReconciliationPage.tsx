@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import { ReconciliationRunItem, ProposalItem } from '../types/api';
 import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { RunTriggerModal, ProposalApprovalModal, ProposalRejectModal } from '../components/Modals';
+import { getMatcherExplanation } from '../utils/formatters';
 
 export function ReconciliationPage({ tenantId }: { tenantId: string }) {
   const [runs, setRuns] = useState<ReconciliationRunItem[]>([]);
@@ -177,7 +178,10 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                       <div className="flex justify-between">
                         <span>Executed:</span>
                         <span className="font-mono text-slate-400 text-[11px]">
-                          {r.run_at ? new Date(r.run_at).toLocaleString() : '-'}
+                          {(() => {
+                            const execTime = r.run_at || r.executed_at || r.created_at;
+                            return execTime ? new Date(execTime).toLocaleString() : 'Completed';
+                          })()}
                         </span>
                       </div>
                     </div>
@@ -218,15 +222,22 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                     <tr>
                       <th>Payment</th>
                       <th>Target Invoice(s)</th>
-                      <th>Outcome</th>
+                      <th>Match Reason & Evidence</th>
                       <th>Verifier</th>
                       <th>Decision</th>
-                      <th>Action</th>
+                      <th className="col-sticky-right text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {runDetail.proposals.map((p) => {
                       const isPending = p.decision_status === 'PENDING';
+                      const expl = getMatcherExplanation(
+                        p.outcome,
+                        p.evidence,
+                        p.excess_amount_minor,
+                        p.ambiguity_certificate
+                      );
+
                       return (
                         <tr key={p.id}>
                           <td>
@@ -238,22 +249,27 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                           </td>
                           <td>
                             {p.allocations.length === 0 ? (
-                              <span className="text-slate-500 text-xs italic">No invoice candidates</span>
+                              <span className="text-slate-500 text-xs italic">No invoice allocated</span>
                             ) : (
                               <div className="space-y-1">
                                 {p.allocations.map((a, idx) => (
                                   <div key={idx} className="text-xs flex items-center justify-between gap-2">
-                                    <span className="font-mono text-emerald-400">{a.invoice_number}</span>
+                                    <span className="font-mono text-emerald-400 font-medium">{a.invoice_number}</span>
                                     <MoneyDisplay amountMinor={a.amount_minor} currency={a.currency} className="text-slate-300 font-medium" />
                                   </div>
                                 ))}
                               </div>
                             )}
                           </td>
-                          <td>
-                            <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
-                              {p.outcome}
-                            </span>
+                          <td className="max-w-[260px]">
+                            <div className="space-y-1">
+                              <span className="badge badge-info text-[10px] font-mono">
+                                {expl.badgeLabel}
+                              </span>
+                              <p className="text-[11px] text-slate-400 leading-tight">
+                                {expl.summary}
+                              </p>
+                            </div>
                           </td>
                           <td>
                             <VerifierStatusBadge status={p.verifier_status} />
@@ -261,9 +277,9 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                           <td>
                             <StatusBadge status={p.decision_status} />
                           </td>
-                          <td>
+                          <td className="col-sticky-right text-right" onClick={(e) => e.stopPropagation()}>
                             {isPending && p.outcome === 'PROPOSED' ? (
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex items-center justify-end gap-1.5">
                                 <button
                                   onClick={() => setSelectedProposalForApproval(p)}
                                   className="btn btn-success py-1 px-2.5 text-[11px]"

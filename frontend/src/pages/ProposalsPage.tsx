@@ -12,8 +12,8 @@ import {
 import { api } from '../api/client';
 import { ProposalItem, ProposalDetail } from '../types/api';
 import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
-import { ProposalApprovalModal, ProposalRejectModal } from '../components/Modals';
-import { getProposalEmptyLabels } from '../utils/formatters';
+import { ProposalApprovalModal, ProposalRejectModal, EvidenceInspectModal } from '../components/Modals';
+import { getProposalEmptyLabels, getMatcherExplanation } from '../utils/formatters';
 
 export function ProposalsPage({ tenantId }: { tenantId: string }) {
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
@@ -23,6 +23,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
   // Modals
   const [selectedForApproval, setSelectedForApproval] = useState<ProposalItem | null>(null);
   const [selectedForRejection, setSelectedForRejection] = useState<ProposalItem | null>(null);
+  const [selectedForInspect, setSelectedForInspect] = useState<ProposalItem | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const fetchProposals = async () => {
@@ -73,12 +74,22 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
     }
   };
 
+  const actionableCount = proposals.filter((p) => p.decision_status === 'PENDING' && p.outcome === 'PROPOSED').length;
+  const unresolvedCount = proposals.filter((p) => p.decision_status === 'PENDING').length;
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-bold tracking-tight text-white">Human Review Queue</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold tracking-tight text-white">Human Review Queue</h2>
+            {statusFilter === 'PENDING' && (
+              <span className="badge badge-info text-xs font-mono">
+                {actionableCount} Actionable ({unresolvedCount} Unresolved)
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-400 mt-1">
             Authoritative operator approval queue. Proposals require human sign-off before financial ledger mutation.
           </p>
@@ -107,7 +118,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
               }`}
             >
-              {tab === 'PENDING' ? 'Pending Human Review' : tab}
+              {tab === 'PENDING' ? `Pending Review (${actionableCount} actionable)` : tab}
             </button>
           );
         })}
@@ -132,15 +143,22 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                   <th>Proposal ID</th>
                   <th>Payment</th>
                   <th>Allocated Invoices</th>
-                  <th>Outcome</th>
+                  <th>Match Reason & Evidence</th>
                   <th>Safety Verifier</th>
                   <th>Decision Status</th>
-                  <th>Actions</th>
+                  <th className="col-sticky-right text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {proposals.map((p) => {
                   const isPending = p.decision_status === 'PENDING';
+                  const expl = getMatcherExplanation(
+                    p.outcome,
+                    p.evidence,
+                    p.excess_amount_minor,
+                    p.ambiguity_certificate
+                  );
+
                   return (
                     <tr key={p.id}>
                       <td>
@@ -160,7 +178,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                       </td>
                       <td>
                         {p.allocations.length === 0 ? (
-                          <span className="text-slate-500 text-xs italic">None</span>
+                          <span className="text-slate-500 text-xs italic">No allocation</span>
                         ) : (
                           <div className="space-y-1">
                             {p.allocations.map((a, idx) => (
@@ -172,10 +190,15 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                           </div>
                         )}
                       </td>
-                      <td>
-                        <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
-                          {p.outcome}
-                        </span>
+                      <td className="max-w-[280px]">
+                        <div className="space-y-1">
+                          <span className="badge badge-info text-[11px] font-mono">
+                            {expl.badgeLabel}
+                          </span>
+                          <p className="text-[11px] text-slate-400 leading-tight line-clamp-2">
+                            {expl.summary}
+                          </p>
+                        </div>
                       </td>
                       <td>
                         <VerifierStatusBadge status={p.verifier_status} />
@@ -183,25 +206,34 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                       <td>
                         <StatusBadge status={p.decision_status} />
                       </td>
-                      <td>
-                        {isPending && p.outcome === 'PROPOSED' ? (
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => setSelectedForApproval(p)}
-                              className="btn btn-success py-1 px-3 text-xs"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => setSelectedForRejection(p)}
-                              className="btn btn-danger py-1 px-2.5 text-xs"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-slate-500 italic">No action required</span>
-                        )}
+                      <td className="col-sticky-right text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => setSelectedForInspect(p)}
+                            className="btn btn-secondary py-1 px-2 text-[11px] text-slate-300 hover:text-white"
+                            title="Inspect matching signals, candidate invoices, and verifier checks"
+                          >
+                            Evidence
+                          </button>
+                          {isPending && p.outcome === 'PROPOSED' ? (
+                            <>
+                              <button
+                                onClick={() => setSelectedForApproval(p)}
+                                className="btn btn-success py-1 px-2.5 text-xs font-semibold"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => setSelectedForRejection(p)}
+                                className="btn btn-danger py-1 px-2 text-xs"
+                              >
+                                Reject
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-[11px] text-slate-500 italic pr-1">No action</span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -213,6 +245,12 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
       </div>
 
       {/* Modals */}
+      <EvidenceInspectModal
+        isOpen={Boolean(selectedForInspect)}
+        onClose={() => setSelectedForInspect(null)}
+        proposal={selectedForInspect}
+      />
+
       <ProposalApprovalModal
         isOpen={Boolean(selectedForApproval)}
         onClose={() => setSelectedForApproval(null)}

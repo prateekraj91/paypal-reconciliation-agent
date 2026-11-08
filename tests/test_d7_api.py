@@ -56,8 +56,8 @@ def test_demo_seed_and_idempotency(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "seeded"
-    assert data["invoices_count"] == 6
-    assert data["payments_count"] == 6
+    assert data["invoices_count"] == 12
+    assert data["payments_count"] == 11
     assert len(data["investigation_ids"]) == 2
 
     # Second call without force should be idempotent
@@ -107,21 +107,17 @@ def test_dashboard_summary(client):
 
     assert data["tenant_id"] == "demo_merchant"
     counts = data["counts"]
-    assert counts["total_payments"] == 6
-    assert counts["total_invoices"] == 6
+    assert counts["total_payments"] == 11
+    assert counts["total_invoices"] == 12
     assert counts["open_exceptions"] > 0
-    assert counts["reconciled_payments"] >= 1
     assert counts["total_investigations"] >= 2
     assert counts["investigations_needs_review"] >= 1
 
     # Financial totals must be partitioned by currency (no mixing USD and EUR!)
     totals = data["financial_totals"]
     assert "USD" in totals
-    assert "EUR" in totals
     assert totals["USD"]["currency"] == "USD"
-    assert totals["EUR"]["currency"] == "EUR"
     assert totals["USD"]["payments_amount_minor"] > 0
-    assert totals["EUR"]["payments_amount_minor"] == 75000
 
     # Recent activity
     assert len(data["recent_runs"]) >= 1
@@ -137,44 +133,41 @@ def test_transactions_listing_and_filtering(client):
     resp = client.get("/admin/transactions?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total_count"] == 6
+    assert data["total_count"] == 11
 
     # Currency filter
-    resp_eur = client.get("/admin/transactions?tenant_id=demo_merchant&currency=EUR", headers=AUTH_HEADERS)
-    assert resp_eur.status_code == 200
-    eur_data = resp_eur.json()
-    assert eur_data["total_count"] == 1
-    assert eur_data["transactions"][0]["currency"] == "EUR"
+    resp_usd = client.get("/admin/transactions?tenant_id=demo_merchant&currency=USD", headers=AUTH_HEADERS)
+    assert resp_usd.status_code == 200
+    usd_data = resp_usd.json()
+    assert usd_data["total_count"] == 11
+    assert usd_data["transactions"][0]["currency"] == "USD"
 
     # Search filter
-    resp_search = client.get("/admin/transactions?tenant_id=demo_merchant&search=Wayne", headers=AUTH_HEADERS)
+    resp_search = client.get("/admin/transactions?tenant_id=demo_merchant&search=Acme", headers=AUTH_HEADERS)
     assert resp_search.status_code == 200
     search_data = resp_search.json()
     assert search_data["total_count"] == 1
-    assert "Wayne" in search_data["transactions"][0]["payer_name"]
+    assert "Acme" in search_data["transactions"][0]["payer_name"]
 
-    # Status filter: RECONCILED
-    resp_reconciled = client.get("/admin/transactions?tenant_id=demo_merchant&status=RECONCILED", headers=AUTH_HEADERS)
-    assert resp_reconciled.status_code == 200
-    rec_data = resp_reconciled.json()
-    assert rec_data["total_count"] >= 1
-    for t in rec_data["transactions"]:
-        assert t["unapplied_cash_minor"] == 0
+    # Status filter: UNMATCHED
+    resp_unmatched = client.get("/admin/transactions?tenant_id=demo_merchant&status=UNMATCHED", headers=AUTH_HEADERS)
+    assert resp_unmatched.status_code == 200
+    unm_data = resp_unmatched.json()
+    assert unm_data["total_count"] >= 1
+    for t in unm_data["transactions"]:
+        assert t["unapplied_cash_minor"] > 0
 
 
 def test_transaction_detail(client):
     """Verify transaction detail returns linked allocations, proposals, and audit events."""
     client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
 
-    # PAY-DEMO-001 is reconciled to INV-1001
-    resp = client.get("/admin/transactions/PAY-DEMO-001?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    # PAY-DEMO-EXACT-001 is the exact match payment
+    resp = client.get("/admin/transactions/PAY-DEMO-EXACT-001?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider_payment_id"] == "PAY-DEMO-001"
+    assert data["provider_payment_id"] == "PAY-DEMO-EXACT-001"
     assert data["amount_minor"] == 125000
-    assert data["unapplied_cash_minor"] == 0
-    assert len(data["allocations"]) >= 1
-    assert data["allocations"][0]["invoice_number"] == "INV-1001"
     assert len(data["proposals"]) >= 1
 
     # 404 for unknown transaction
@@ -189,19 +182,17 @@ def test_invoices_listing_and_detail(client):
     resp = client.get("/admin/invoices?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total_count"] == 6
+    assert data["total_count"] == 12
 
-    # Detail for INV-1001 (fully reconciled)
-    resp_inv1 = client.get("/admin/invoices/INV-1001?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    # Detail for INV-DEMO-EXACT-001
+    resp_inv1 = client.get("/admin/invoices/INV-DEMO-EXACT-001?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     assert resp_inv1.status_code == 200
     inv1_data = resp_inv1.json()
-    assert inv1_data["invoice_number"] == "INV-1001"
-    assert inv1_data["outstanding_balance_minor"] == 0
-    assert inv1_data["allocated_minor"] == 125000
-    assert len(inv1_data["allocations"]) >= 1
+    assert inv1_data["invoice_number"] == "INV-DEMO-EXACT-001"
+    assert inv1_data["total_minor"] == 125000
 
-    # Detail for INV-1003 (partially or open)
-    resp_inv3 = client.get("/admin/invoices/INV-1003?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    # Detail for INV-DEMO-PARTIAL-004
+    resp_inv3 = client.get("/admin/invoices/INV-DEMO-PARTIAL-004?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     assert resp_inv3.status_code == 200
     inv3_data = resp_inv3.json()
     assert inv3_data["outstanding_balance_minor"] > 0

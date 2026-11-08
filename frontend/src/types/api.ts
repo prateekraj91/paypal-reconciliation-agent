@@ -2,7 +2,7 @@
  * TypeScript API models for PayPal Reconciliation Agent Frontend.
  */
 
-export type ReconciliationStatus = 'RECONCILED' | 'UNMATCHED' | 'PARTIALLY_RECONCILED';
+export type ReconciliationStatus = 'RECONCILED' | 'UNMATCHED' | 'PARTIALLY_RECONCILED' | 'AMBIGUOUS';
 export type DecisionStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'ESCALATED';
 export type VerifierStatus = 'NOT_VERIFIED' | 'VERIFIED' | 'NEEDS_REVIEW' | 'INVALID' | 'UNVERIFIED';
 
@@ -16,6 +16,8 @@ export interface DashboardSummary {
     open_exceptions: number;
     total_invoices: number;
     total_proposals: number;
+    actionable_proposals?: number;
+    unresolved_proposals?: number;
     pending_proposals: number;
     approved_proposals: number;
     rejected_proposals: number;
@@ -28,6 +30,8 @@ export interface DashboardSummary {
     string,
     {
       currency: string;
+      payments_count?: number;
+      invoices_count?: number;
       payments_amount_minor: number;
       invoices_amount_minor: number;
       reconciled_amount_minor: number;
@@ -77,6 +81,11 @@ export interface TransactionItem {
   unapplied_cash_minor: number;
   allocated_minor: number;
   reconciliation_status: ReconciliationStatus;
+  record_type?: string;
+  refund_amount_minor?: number;
+  reversal_amount_minor?: number;
+  net_amount_minor?: number;
+  dispute_id?: string | null;
 }
 
 export interface TransactionDetail extends TransactionItem {
@@ -107,6 +116,8 @@ export interface TransactionDetail extends TransactionItem {
     status: string;
     record_type: string;
     refunded_at: string | null;
+    reason?: string | null;
+    dispute_id?: string | null;
   }>;
   proposals: Array<{
     id: string;
@@ -191,6 +202,8 @@ export interface ProposalItem {
   outcome: string;
   verifier_status: string;
   decision_status: DecisionStatus;
+  evidence?: string[];
+  ambiguity_certificate?: Record<string, any> | null;
   allocations: Array<{
     invoice_id: string;
     invoice_number: string;
@@ -235,6 +248,8 @@ export interface ReconciliationRunItem {
   status: string;
   metrics: Record<string, any>;
   run_at: string | null;
+  created_at?: string | null;
+  executed_at?: string | null;
   proposals?: ProposalItem[];
   total_proposals?: number;
 }

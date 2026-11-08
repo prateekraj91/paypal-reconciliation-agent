@@ -149,7 +149,7 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
                   <th>Total Amount</th>
                   <th>Allocated / Settled</th>
                   <th>Ledger Outstanding</th>
-                  <th>Status</th>
+                  <th className="col-sticky-right text-right">Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -196,7 +196,7 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
                         <span className="text-emerald-400 text-xs font-mono font-medium">PAID ($0.00)</span>
                       )}
                     </td>
-                    <td>
+                    <td className="col-sticky-right text-right">
                       <StatusBadge status={inv.reconciliation_status} />
                     </td>
                   </tr>

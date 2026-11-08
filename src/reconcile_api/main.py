@@ -767,6 +767,8 @@ def list_runs(
                 "matcher_version": r.matcher_version,
                 "summary_metrics": getattr(r, "metrics", None) if getattr(r, "metrics", None) is not None else (json.loads(r.metrics_json) if r.metrics_json else {}),
                 "created_at": r.run_at.isoformat() if r.run_at else None,
+                "run_at": r.run_at.isoformat() if r.run_at else None,
+                "executed_at": r.run_at.isoformat() if r.run_at else None,
             }
             for r in runs
         ]
@@ -985,6 +987,8 @@ def get_dashboard_summary(
                 "invoices_amount_minor": 0,
                 "reconciled_amount_minor": 0,
                 "unapplied_cash_minor": 0,
+                "payments_count": 0,
+                "invoices_count": 0,
             }
         return financial_totals[c]
 
@@ -995,6 +999,7 @@ def get_dashboard_summary(
 
     for p in payments:
         bucket = get_currency_bucket(p.currency)
+        bucket["payments_count"] += 1
         bucket["payments_amount_minor"] += p.amount_minor
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
         bucket["unapplied_cash_minor"] += unapplied
@@ -1021,11 +1026,13 @@ def get_dashboard_summary(
 
     for inv in invoices:
         bucket = get_currency_bucket(inv.currency)
+        bucket["invoices_count"] += 1
         bucket["invoices_amount_minor"] += inv.total_minor
 
     stmt_props = select(ProposalRecord).where(ProposalRecord.tenant_id == effective_tenant)
     proposals = session.scalars(stmt_props).all()
     pending_proposals = 0
+    actionable_proposals = 0
     approved_proposals = 0
     rejected_proposals = 0
 
@@ -1038,6 +1045,13 @@ def get_dashboard_summary(
             rejected_proposals += 1
         else:
             pending_proposals += 1
+            # Actionable: PROPOSED outcome with VERIFIED safety checks and non-empty allocations
+            if (
+                prop.outcome == "PROPOSED"
+                and prop.verifier_status == "VERIFIED"
+                and len(prop.allocations) > 0
+            ):
+                actionable_proposals += 1
 
     invg_needs_review = sum(1 for i in investigations if i.status == "NEEDS_REVIEW")
     invg_completed = sum(1 for i in investigations if i.status == "COMPLETED")
@@ -1053,7 +1067,9 @@ def get_dashboard_summary(
             "open_exceptions": len(open_exceptions_list),
             "total_invoices": len(invoices),
             "total_proposals": len(proposals),
-            "pending_proposals": pending_proposals,
+            "pending_proposals": actionable_proposals,
+            "actionable_proposals": actionable_proposals,
+            "unresolved_proposals": pending_proposals,
             "approved_proposals": approved_proposals,
             "rejected_proposals": rejected_proposals,
             "total_investigations": len(investigations),
@@ -1092,6 +1108,7 @@ def get_dashboard_summary(
 def list_transactions(
     tenant_id: Optional[str] = None,
     status: Optional[str] = None,
+    record_type: Optional[str] = None,
     currency: Optional[str] = None,
     search: Optional[str] = None,
     limit: int = 50,
@@ -1099,7 +1116,7 @@ def list_transactions(
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """List financial transactions with search, currency and reconciliation status filters."""
+    """List financial transactions with search, currency, record type, and reconciliation status filters."""
     config = APIConfig.from_env()
     effective_tenant = tenant_id or config.default_tenant_id
     pay_repo = PaymentRepository(session)
@@ -1120,19 +1137,59 @@ def list_transactions(
     stmt = stmt.order_by(PaymentRecord.received_at.desc())
     all_payments = session.scalars(stmt).all()
 
+    # Pre-load refunds and reversals for the tenant
+    stmt_refs = select(RefundRecord).where(RefundRecord.tenant_id == effective_tenant)
+    all_refunds = session.scalars(stmt_refs).all()
+    refunds_by_payment: dict[str, list[RefundRecord]] = {}
+    for r in all_refunds:
+        refunds_by_payment.setdefault(r.parent_payment_id, []).append(r)
+
+    # Pre-load provider settlements
+    stmt_settlements = select(ProviderSettlementRecord).where(ProviderSettlementRecord.tenant_id == effective_tenant)
+    all_settlements = session.scalars(stmt_settlements).all()
+    settled_payment_ids = {s.payment_id for s in all_settlements if s.payment_id} | {s.provider_settlement_id for s in all_settlements}
+
+    # Pre-load ambiguous proposals
+    stmt_ambig = select(ProposalRecord).where(
+        ProposalRecord.tenant_id == effective_tenant,
+        ProposalRecord.outcome == "AMBIGUOUS",
+    )
+    ambiguous_payment_ids = {prop.payment_id for prop in session.scalars(stmt_ambig).all()}
+
     filtered_transactions = []
     for p in all_payments:
+        p_refunds = refunds_by_payment.get(p.id, [])
+        refund_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REFUND")
+        reversal_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REVERSAL")
+        is_settled = p.id in settled_payment_ids or p.provider_payment_id in settled_payment_ids
+        dispute_id = next((r.dispute_id for r in p_refunds if r.dispute_id), None)
+
+        if reversal_minor > 0:
+            rec_type = "REVERSAL"
+        elif refund_minor > 0:
+            rec_type = "REFUND"
+        elif is_settled:
+            rec_type = "SETTLEMENT"
+        else:
+            rec_type = "PAYMENT"
+
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
         if unapplied == 0:
             reconciliation_status = "RECONCILED"
+        elif p.id in ambiguous_payment_ids:
+            reconciliation_status = "AMBIGUOUS"
         elif unapplied == p.amount_minor:
             reconciliation_status = "UNMATCHED"
         else:
             reconciliation_status = "PARTIALLY_RECONCILED"
 
+        if record_type and record_type.strip().upper() != "ALL":
+            if rec_type != record_type.strip().upper():
+                continue
+
         if status:
             norm_s = status.strip().upper()
-            if norm_s in ("RECONCILED", "UNMATCHED", "PARTIALLY_RECONCILED"):
+            if norm_s in ("RECONCILED", "UNMATCHED", "PARTIALLY_RECONCILED", "AMBIGUOUS"):
                 if reconciliation_status != norm_s:
                     continue
             else:
@@ -1154,6 +1211,11 @@ def list_transactions(
             "unapplied_cash_minor": unapplied,
             "allocated_minor": p.amount_minor - unapplied,
             "reconciliation_status": reconciliation_status,
+            "record_type": rec_type,
+            "refund_amount_minor": refund_minor,
+            "reversal_amount_minor": reversal_minor,
+            "net_amount_minor": p.amount_minor - refund_minor - reversal_minor,
+            "dispute_id": dispute_id,
         })
 
     paginated = filtered_transactions[offset : offset + limit]
@@ -1322,6 +1384,30 @@ def get_transaction(
         for a in audit_events
     ]
 
+    refund_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REFUND")
+    reversal_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REVERSAL")
+    dispute_id = next((r.get("dispute_id") for r in ref_list if r.get("dispute_id")), None)
+    is_settled = len(sett_list) > 0
+
+    if reversal_minor > 0:
+        rec_type = "REVERSAL"
+    elif refund_minor > 0:
+        rec_type = "REFUND"
+    elif is_settled:
+        rec_type = "SETTLEMENT"
+    else:
+        rec_type = "PAYMENT"
+
+    has_ambiguity = any(pr.get("outcome") == "AMBIGUOUS" for pr in prop_list)
+    if unapplied == 0:
+        reconciliation_status = "RECONCILED"
+    elif has_ambiguity:
+        reconciliation_status = "AMBIGUOUS"
+    elif unapplied == p.amount_minor:
+        reconciliation_status = "UNMATCHED"
+    else:
+        reconciliation_status = "PARTIALLY_RECONCILED"
+
     return {
         "id": p.id,
         "provider": p.provider,
@@ -1336,6 +1422,12 @@ def get_transaction(
         "received_at": p.received_at.isoformat() if p.received_at else None,
         "unapplied_cash_minor": unapplied,
         "allocated_minor": p.amount_minor - unapplied,
+        "reconciliation_status": reconciliation_status,
+        "record_type": rec_type,
+        "refund_amount_minor": refund_minor,
+        "reversal_amount_minor": reversal_minor,
+        "net_amount_minor": p.amount_minor - refund_minor - reversal_minor,
+        "dispute_id": dispute_id,
         "allocations": alloc_list,
         "settlements": sett_list,
         "refunds": ref_list,
@@ -1596,6 +1688,8 @@ def get_run(
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
+            "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
+            "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
             "created_at": p.created_at.isoformat() if p.created_at else None,
         })
 
@@ -1664,6 +1758,8 @@ def list_proposals(
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
+            "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
+            "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
             "created_at": p.created_at.isoformat() if p.created_at else None,
         })
 
@@ -1750,6 +1846,8 @@ def get_proposal(
         "verifications": ver_list,
         "decisions": dec_list,
         "excess_amount_minor": p.excess_amount_minor,
+        "evidence": json.loads(p.evidence_json) if p.evidence_json else [],
+        "ambiguity_certificate": json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
