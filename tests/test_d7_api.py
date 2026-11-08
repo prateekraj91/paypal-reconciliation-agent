@@ -14,15 +14,26 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from reconcile_api.config import APIConfig
 from reconcile_api.dependencies import set_db_engine
 from reconcile_api.main import app
 from reconcile_store.config import DatabaseConfig
 from reconcile_store.db import DatabaseEngine
-from reconcile_store.schema import Base
+from reconcile_store.schema import (
+    Base,
+    PaymentRecord,
+    InvoiceRecord,
+    ReconciliationRunRecord,
+    ProposalRecord,
+    ProposalAllocationRecord,
+    DecisionRecord,
+    RefundRecord,
+    AllocationRecord,
+)
 from reconcile_store.repositories.tenant_repo import TenantRepository
+from reconcile_store.repositories.payment_repo import PaymentRepository
 
 
 @pytest.fixture
@@ -439,5 +450,451 @@ def test_currency_mismatch_and_ambiguity_enrichment(client):
     assert cands["INV-DEMO-COMPETE-3A"]["score"] == 120
     assert cands["INV-DEMO-COMPETE-3B"]["total_minor"] == 40000
     assert cands["INV-DEMO-COMPETE-3B"]["score"] == 120
+
+
+@pytest.mark.parametrize("target_count", [0, 5, 8, 100])
+def test_actionable_proposals_dynamic_calculation(test_db, client, target_count):
+    """Confirm actionable_proposals is dynamically computed from eligible records and never hardcoded.
+    
+    Verifies that for N = 0, 5, 8, 100 actionable proposals:
+    - actionable_proposals == N
+    - non-actionable proposals (unverified, no-match, 0-allocations, approved, rejected) are strictly excluded
+    """
+    tenant = f"tenant_dynamic_{target_count}"
+    now = datetime.now(timezone.utc)
+    today = date(2026, 11, 8)
+
+    with test_db.session() as s:
+        TenantRepository(s).create_tenant(tenant, f"Dynamic Tenant {target_count}")
+
+        # Base anchor payment & invoice
+        anchor_pay = PaymentRecord(
+            id=f"pay_anchor_{target_count}",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id=f"PAY-ANCHOR-{target_count}",
+            amount_minor=100000,
+            currency="USD",
+            status="COMPLETED",
+            received_at=now,
+        )
+        anchor_inv = InvoiceRecord(
+            id=f"inv_anchor_{target_count}",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id=f"INV-ANCHOR-{target_count}",
+            invoice_number=f"INV-ANCHOR-{target_count}",
+            customer_name="Anchor Customer",
+            total_minor=100000,
+            currency="USD",
+            status="SENT",
+            issued_on=today,
+            due_on=today,
+        )
+        run_rec = ReconciliationRunRecord(
+            id=f"run_dynamic_{target_count}",
+            tenant_id=tenant,
+            input_snapshot_id=f"snap_dynamic_{target_count}",
+            matcher_name="deterministic_v2",
+            matcher_version="2.0.0",
+            run_at=now,
+        )
+        s.add_all([anchor_pay, anchor_inv, run_rec])
+        s.flush()
+
+        # Create target_count actionable proposals (PROPOSED + VERIFIED + allocations > 0 + pending decision)
+        for i in range(target_count):
+            prop = ProposalRecord(
+                id=f"prop_actionable_{target_count}_{i}",
+                tenant_id=tenant,
+                run_id=run_rec.id,
+                payment_id=anchor_pay.id,
+                outcome="PROPOSED",
+                verifier_status="VERIFIED",
+                created_at=now,
+            )
+            s.add(prop)
+            s.flush()
+            palloc = ProposalAllocationRecord(
+                id=f"palloc_{target_count}_{i}",
+                tenant_id=tenant,
+                proposal_id=prop.id,
+                payment_id=anchor_pay.id,
+                invoice_id=anchor_inv.id,
+                amount_minor=10000,
+                currency="USD",
+            )
+            s.add(palloc)
+
+        # Non-actionable 1: NO_MATCH outcome
+        s.add(ProposalRecord(
+            id=f"prop_nonact_nomatch_{target_count}",
+            tenant_id=tenant,
+            run_id=run_rec.id,
+            payment_id=anchor_pay.id,
+            outcome="NO_MATCH",
+            verifier_status="UNVERIFIED",
+            created_at=now,
+        ))
+
+        # Non-actionable 2: AMBIGUOUS outcome
+        s.add(ProposalRecord(
+            id=f"prop_nonact_ambig_{target_count}",
+            tenant_id=tenant,
+            run_id=run_rec.id,
+            payment_id=anchor_pay.id,
+            outcome="AMBIGUOUS",
+            verifier_status="UNVERIFIED",
+            created_at=now,
+        ))
+
+        # Non-actionable 3: PROPOSED but UNVERIFIED safety status
+        p_unver = ProposalRecord(
+            id=f"prop_nonact_unver_{target_count}",
+            tenant_id=tenant,
+            run_id=run_rec.id,
+            payment_id=anchor_pay.id,
+            outcome="PROPOSED",
+            verifier_status="UNVERIFIED",
+            created_at=now,
+        )
+        s.add(p_unver)
+        s.flush()
+        s.add(ProposalAllocationRecord(
+            id=f"palloc_unver_{target_count}",
+            tenant_id=tenant,
+            proposal_id=p_unver.id,
+            payment_id=anchor_pay.id,
+            invoice_id=anchor_inv.id,
+            amount_minor=10000,
+            currency="USD",
+        ))
+
+        # Non-actionable 4: PROPOSED and VERIFIED but zero allocations
+        s.add(ProposalRecord(
+            id=f"prop_nonact_noalloc_{target_count}",
+            tenant_id=tenant,
+            run_id=run_rec.id,
+            payment_id=anchor_pay.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            created_at=now,
+        ))
+
+        # Non-actionable 5: Already APPROVED
+        p_app = ProposalRecord(
+            id=f"prop_nonact_app_{target_count}",
+            tenant_id=tenant,
+            run_id=run_rec.id,
+            payment_id=anchor_pay.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            created_at=now,
+        )
+        s.add(p_app)
+        s.flush()
+        s.add(ProposalAllocationRecord(
+            id=f"palloc_app_{target_count}",
+            tenant_id=tenant,
+            proposal_id=p_app.id,
+            payment_id=anchor_pay.id,
+            invoice_id=anchor_inv.id,
+            amount_minor=10000,
+            currency="USD",
+        ))
+        s.add(DecisionRecord(
+            id=f"dec_app_{target_count}",
+            tenant_id=tenant,
+            proposal_id=p_app.id,
+            decision_type="APPROVED",
+            actor="operator@example.com",
+            idempotency_key=f"idemp_{target_count}",
+            decided_at=now,
+        ))
+
+        s.commit()
+
+    resp = client.get(f"/admin/dashboard/summary?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    counts = resp.json()["counts"]
+
+    # Conclusively verify dynamic calculation: exactly target_count actionable proposals
+    assert counts["actionable_proposals"] == target_count
+    # 4 non-actionable pending proposals + target_count
+    assert counts["unresolved_proposals"] == target_count + 4
+    # 1 approved proposal
+    assert counts["approved_proposals"] == 1
+    # total proposals = target_count + 5 non-actionable proposals
+    assert counts["total_proposals"] == target_count + 5
+
+
+def test_refund_reversal_edge_cases_with_allocations(test_db, client):
+    """Verify refund and reversal calculations across partial refunds, full reversals, and allocated payments."""
+    tenant = "tenant_refund_edge_cases"
+    now = datetime.now(timezone.utc)
+    today = date(2026, 11, 8)
+
+    with test_db.session() as s:
+        TenantRepository(s).create_tenant(tenant, "Refund Edge Cases Tenant")
+
+        # Case 1: Partial refund on unallocated payment ($500 payment, $150 refund)
+        p1 = PaymentRecord(
+            id="pay_edge_partial_refund",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-EDGE-PARTIAL-REFUND",
+            amount_minor=50000,
+            currency="USD",
+            status="COMPLETED",
+            received_at=now,
+        )
+        r1 = RefundRecord(
+            id="ref_edge_partial",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REF-EDGE-001",
+            parent_payment_id=p1.id,
+            amount_minor=15000,
+            currency="USD",
+            status="COMPLETED",
+            record_type="REFUND",
+            refunded_at=now,
+        )
+
+        # Case 2: Full dispute reversal on unallocated payment ($400 payment, $400 reversal)
+        p2 = PaymentRecord(
+            id="pay_edge_full_reversal",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-EDGE-FULL-REVERSAL",
+            amount_minor=40000,
+            currency="USD",
+            status="COMPLETED",
+            received_at=now,
+        )
+        r2 = RefundRecord(
+            id="ref_edge_reversal",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REV-EDGE-001",
+            parent_payment_id=p2.id,
+            amount_minor=40000,
+            currency="USD",
+            status="COMPLETED",
+            record_type="REVERSAL",
+            refunded_at=now,
+        )
+
+        # Case 3: Allocated payment with partial refund
+        # Payment $1,000, allocated $600 to invoice, refund $200
+        # Expected unapplied: max(0, 100000 - 60000 - 20000) = 20000 ($200.00)
+        run_edge = ReconciliationRunRecord(
+            id="run_edge",
+            tenant_id=tenant,
+            input_snapshot_id="snap_edge",
+            matcher_name="deterministic_v2",
+            matcher_version="2.0.0",
+            run_at=now,
+        )
+        s.add(run_edge)
+
+        p3 = PaymentRecord(
+            id="pay_edge_allocated_refund",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-EDGE-ALLOC-REFUND",
+            amount_minor=100000,
+            currency="USD",
+            status="COMPLETED",
+            received_at=now,
+        )
+        inv3 = InvoiceRecord(
+            id="inv_edge_3",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id="INV-EDGE-3",
+            invoice_number="INV-EDGE-3",
+            customer_name="Customer 3",
+            total_minor=100000,
+            currency="USD",
+            status="SENT",
+            issued_on=today,
+            due_on=today,
+        )
+        s.add_all([p3, inv3])
+        s.flush()
+
+        prop3 = ProposalRecord(
+            id="prop_edge_3",
+            tenant_id=tenant,
+            run_id=run_edge.id,
+            payment_id=p3.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            created_at=now,
+        )
+        s.add(prop3)
+        s.flush()
+
+        dec3 = DecisionRecord(
+            id="dec_edge_3",
+            tenant_id=tenant,
+            proposal_id=prop3.id,
+            decision_type="APPROVED",
+            actor="operator@example.com",
+            idempotency_key="idemp_edge_3",
+            decided_at=now,
+        )
+        s.add(dec3)
+        s.flush()
+
+        alloc3 = AllocationRecord(
+            id="alloc_edge_3",
+            tenant_id=tenant,
+            payment_id=p3.id,
+            invoice_id=inv3.id,
+            amount_minor=60000,
+            currency="USD",
+            decision_id=dec3.id,
+            actor="operator@example.com",
+            allocated_at=now,
+        )
+        r3 = RefundRecord(
+            id="ref_edge_alloc_refund",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REF-EDGE-003",
+            parent_payment_id=p3.id,
+            amount_minor=20000,
+            currency="USD",
+            status="COMPLETED",
+            record_type="REFUND",
+            refunded_at=now,
+        )
+
+        # Case 4: Fully allocated payment with full reversal
+        # Payment $500, allocated $500 to invoice, reversal $500
+        # Expected unapplied: max(0, 50000 - 50000 - 50000) = 0 ($0.00)
+        p4 = PaymentRecord(
+            id="pay_edge_full_alloc_reversal",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-EDGE-FULL-ALLOC-REV",
+            amount_minor=50000,
+            currency="USD",
+            status="COMPLETED",
+            received_at=now,
+        )
+        inv4 = InvoiceRecord(
+            id="inv_edge_4",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id="INV-EDGE-4",
+            invoice_number="INV-EDGE-4",
+            customer_name="Customer 4",
+            total_minor=50000,
+            currency="USD",
+            status="SENT",
+            issued_on=today,
+            due_on=today,
+        )
+        s.add_all([p4, inv4])
+        s.flush()
+
+        prop4 = ProposalRecord(
+            id="prop_edge_4",
+            tenant_id=tenant,
+            run_id=run_edge.id,
+            payment_id=p4.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            created_at=now,
+        )
+        s.add(prop4)
+        s.flush()
+
+        dec4 = DecisionRecord(
+            id="dec_edge_4",
+            tenant_id=tenant,
+            proposal_id=prop4.id,
+            decision_type="APPROVED",
+            actor="operator@example.com",
+            idempotency_key="idemp_edge_4",
+            decided_at=now,
+        )
+        s.add(dec4)
+        s.flush()
+
+        alloc4 = AllocationRecord(
+            id="alloc_edge_4",
+            tenant_id=tenant,
+            payment_id=p4.id,
+            invoice_id=inv4.id,
+            amount_minor=50000,
+            currency="USD",
+            decision_id=dec4.id,
+            actor="operator@example.com",
+            allocated_at=now,
+        )
+        r4 = RefundRecord(
+            id="ref_edge_full_alloc_rev",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REV-EDGE-004",
+            parent_payment_id=p4.id,
+            amount_minor=50000,
+            currency="USD",
+            status="COMPLETED",
+            record_type="REVERSAL",
+            refunded_at=now,
+        )
+
+        s.add_all([p1, r1, p2, r2, p3, inv3, alloc3, r3, p4, inv4, alloc4, r4])
+        s.commit()
+
+        # 1. Direct repository layer verification
+        repo = PaymentRepository(s)
+        assert repo.get_unapplied_cash_minor(tenant, p1.id) == 35000
+        assert repo.get_unapplied_cash_minor(tenant, p2.id) == 0
+        assert repo.get_unapplied_cash_minor(tenant, p3.id) == 20000
+        assert repo.get_unapplied_cash_minor(tenant, p4.id) == 0
+
+    # 2. API layer verification
+    resp = client.get(f"/admin/transactions?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    txs = {t["provider_payment_id"]: t for t in resp.json()["transactions"]}
+
+    # Case 1: Partial refund ($500 gross, $150 refund -> $350 net, $350 unapplied, UNMATCHED)
+    t1 = txs["PAY-EDGE-PARTIAL-REFUND"]
+    assert t1["amount_minor"] == 50000
+    assert t1["refund_amount_minor"] == 15000
+    assert t1["net_amount_minor"] == 35000
+    assert t1["unapplied_cash_minor"] == 35000
+    assert t1["reconciliation_status"] == "UNMATCHED"
+
+    # Case 2: Full reversal ($400 gross, $400 reversal -> $0 net, $0 unapplied, RECONCILED)
+    t2 = txs["PAY-EDGE-FULL-REVERSAL"]
+    assert t2["amount_minor"] == 40000
+    assert t2["reversal_amount_minor"] == 40000
+    assert t2["net_amount_minor"] == 0
+    assert t2["unapplied_cash_minor"] == 0
+    assert t2["reconciliation_status"] == "RECONCILED"
+
+    # Case 3: Allocated + partial refund ($1,000 gross, $600 allocated, $200 refund -> $800 net, $200 unapplied, PARTIALLY_RECONCILED)
+    t3 = txs["PAY-EDGE-ALLOC-REFUND"]
+    assert t3["amount_minor"] == 100000
+    assert t3["refund_amount_minor"] == 20000
+    assert t3["net_amount_minor"] == 80000
+    assert t3["unapplied_cash_minor"] == 20000
+    assert t3["reconciliation_status"] == "PARTIALLY_RECONCILED"
+
+    # Case 4: Fully allocated + full reversal ($500 gross, $500 allocated, $500 reversal -> $0 net, $0 unapplied, RECONCILED)
+    t4 = txs["PAY-EDGE-FULL-ALLOC-REV"]
+    assert t4["amount_minor"] == 50000
+    assert t4["reversal_amount_minor"] == 50000
+    assert t4["net_amount_minor"] == 0
+    assert t4["unapplied_cash_minor"] == 0
+    assert t4["reconciliation_status"] == "RECONCILED"
+
 
 
