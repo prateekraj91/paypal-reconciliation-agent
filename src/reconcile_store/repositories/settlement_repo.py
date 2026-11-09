@@ -71,6 +71,34 @@ class ProviderSettlementRepository(BaseRepository[ProviderSettlementRecord]):
         self.session.flush()
         return settlement
 
+    def find_settlement(
+        self,
+        tenant_id: str,
+        provider: str,
+        environment: str,
+        invoice_id: str,
+        provider_settlement_id: str,
+    ) -> Optional[ProviderSettlementRecord]:
+        stmt = select(ProviderSettlementRecord).where(
+            ProviderSettlementRecord.tenant_id == tenant_id,
+            ProviderSettlementRecord.provider == provider,
+            ProviderSettlementRecord.environment == environment,
+            ProviderSettlementRecord.invoice_id == invoice_id,
+            ProviderSettlementRecord.provider_settlement_id == provider_settlement_id,
+        )
+        return self.session.scalars(stmt).first()
+
+    def list_for_provider_payment(
+        self, tenant_id: str, provider: str, environment: str, provider_settlement_id: str
+    ) -> Sequence[ProviderSettlementRecord]:
+        stmt = select(ProviderSettlementRecord).where(
+            ProviderSettlementRecord.tenant_id == tenant_id,
+            ProviderSettlementRecord.provider == provider,
+            ProviderSettlementRecord.environment == environment,
+            ProviderSettlementRecord.provider_settlement_id == provider_settlement_id,
+        )
+        return self.session.scalars(stmt).all()
+
     def get_settlement(self, tenant_id: str, settlement_id: str) -> Optional[ProviderSettlementRecord]:
         settlement = self.session.get(ProviderSettlementRecord, settlement_id)
         if settlement and settlement.tenant_id == tenant_id:
