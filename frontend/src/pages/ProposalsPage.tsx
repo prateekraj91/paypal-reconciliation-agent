@@ -11,11 +11,12 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { ProposalItem, ProposalDetail } from '../types/api';
-import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { LoadErrorBanner, MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { ProposalApprovalModal, ProposalRejectModal, EvidenceInspectModal } from '../components/Modals';
-import { getProposalEmptyLabels, getMatcherExplanation } from '../utils/formatters';
+import { isApprovalEligible, getProposalEmptyLabels, getMatcherExplanation } from '../utils/formatters';
 
 export function ProposalsPage({ tenantId }: { tenantId: string }) {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<'PENDING' | 'APPROVED' | 'REJECTED' | 'ALL'>('PENDING');
@@ -28,6 +29,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
 
   const fetchProposals = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listProposals({
         tenantId,
@@ -37,6 +39,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
       setProposals(data.proposals);
     } catch (err) {
       console.error('Failed to load proposals', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setIsLoading(false);
     }
@@ -74,11 +77,14 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
     }
   };
 
-  const actionableCount = proposals.filter((p) => p.decision_status === 'PENDING' && p.outcome === 'PROPOSED').length;
+  const actionableCount = proposals.filter(
+    (p) => p.decision_status === 'PENDING' && p.outcome === 'PROPOSED' && isApprovalEligible(p),
+  ).length;
   const unresolvedCount = proposals.filter((p) => p.decision_status === 'PENDING').length;
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <LoadErrorBanner message={loadError} />
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
@@ -152,7 +158,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
               <tbody>
                 {proposals.map((p) => {
                   const isPending = p.decision_status === 'PENDING';
-                  const isEligible = p.approval_eligible !== false && p.verifier_status !== 'INVALID';
+                  const isEligible = isApprovalEligible(p);
                   const expl = getMatcherExplanation(
                     p.outcome,
                     p.evidence,
@@ -201,6 +207,10 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                           ) : p.verifier_status === 'NEEDS_REVIEW' && !isEligible ? (
                             <span className="badge badge-warning text-[11px] font-mono">
                               REMITTER MISMATCH
+                            </span>
+                          ) : isPending && p.outcome === 'PROPOSED' && !isEligible ? (
+                            <span className="badge badge-warning text-[11px] font-mono">
+                              APPROVAL BLOCKED
                             </span>
                           ) : (
                             <span className="badge badge-info text-[11px] font-mono">

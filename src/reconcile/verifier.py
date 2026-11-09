@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Optional, Sequence
 
 from .delivery import resolve_delivery_stream
 from .models import (
@@ -24,6 +24,7 @@ from .models import (
     Refund,
     cross_check_invoice_balance,
     outstanding_cents,
+    payment_net_cents,
 )
 from .normalize import canonical_reference, extract_invoice_references
 
@@ -44,6 +45,7 @@ def verify_proposals(
     existing_allocations: Sequence[PaymentAllocation] = (),
     refunds: Sequence[Refund] = (),
     reversals: Sequence[PaymentReversal] = (),
+    payment_capacity: Optional[Mapping[str, int]] = None,
 ) -> list[VerificationResult]:
     """Verify proposed allocations against payment and invoice records.
 
@@ -57,6 +59,9 @@ def verify_proposals(
     `existing_allocations` represents ledger allocations. Only APPROVED
     allocations reduce outstanding balances. Conflicting proposals in this
     batch are all rejected if, together, they would exceed invoice capacity.
+
+    `payment_capacity` maps payment_id to the money still available according to
+    the ledger. Without an entry, capacity is the gross less completed returns.
     """
     deliveries = resolve_delivery_stream(payments)
     proposal_counts = Counter(p.payment_id for p in proposals)
@@ -142,16 +147,33 @@ def verify_proposals(
             issues.append("candidate payment ID does not match payment record")
 
         excess = getattr(proposal, "excess_amount_cents", 0)
-        if excess > 0:
-            if candidate.total_cents + excess != payment.amount_cents:
+        if payment_capacity is not None and payment.payment_id in payment_capacity:
+            available = payment_capacity[payment.payment_id]
+        else:
+            available = payment_net_cents(
+                payment.payment_id, payment.amount_cents, refunds, reversals
+            )
+        basis = (
+            f"payment amount {available} cents"
+            if available == payment.amount_cents
+            else f"current available payment capacity of {available} cents "
+            f"(gross {payment.amount_cents} cents) after refunds, reversals or earlier applications"
+        )
+        if available <= 0:
+            issues.append(
+                f"payment {payment.payment_id} has no remaining allocation capacity: "
+                f"gross {payment.amount_cents} cents has been fully refunded, reversed or applied"
+            )
+        elif excess > 0:
+            if candidate.total_cents + excess != available:
                 issues.append(
                     f"candidate allocation total {candidate.total_cents} cents plus excess {excess} cents "
-                    f"does not equal payment amount {payment.amount_cents} cents"
+                    f"does not equal {basis}"
                 )
-        elif candidate.total_cents != payment.amount_cents:
+        elif candidate.total_cents != available:
             issues.append(
                 f"candidate allocation total {candidate.total_cents} cents "
-                f"does not equal payment amount {payment.amount_cents} cents"
+                f"does not equal {basis}"
             )
 
         if not candidate.allocations:

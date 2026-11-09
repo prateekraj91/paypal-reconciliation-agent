@@ -311,6 +311,18 @@ def test_verifier_accounting_with_existing_reversals(isolated_db: Session):
     )
     workflow.ingest_reversals("tenant_harden", [rev])
 
+    # The reversed payment's remaining $40 is fully applied, so it has no capacity
+    # of its own. The restored invoice balance is payable by a replacement payment.
+    replacement = Payment(
+        payment_id="PAY-REV-2",
+        amount_cents=10000,
+        currency="USD",
+        received_at=datetime(2026, 1, 14, tzinfo=timezone.utc),
+        payer_name="Reversal Client",
+        status=PaymentStatus.COMPLETED,
+    )
+    workflow.ingest_payments("tenant_harden", [replacement])
+
     verifier = IndependentSafetyVerifier(isolated_db, "tenant_harden")
 
     # Suggest 6,000 cents -> Allowed
@@ -318,7 +330,7 @@ def test_verifier_accounting_with_existing_reversals(isolated_db: Session):
         investigation_id="invg_rev_ok",
         tenant_id="tenant_harden",
         target_type="payment",
-        target_id="PAY-REV-1",
+        target_id="PAY-REV-2",
         classification=InvestigationClassification.REVERSAL_DISCREPANCY,
         executive_summary="Allocating restored reversed capacity",
         suggested_resolution=SuggestedResolution(
@@ -335,7 +347,7 @@ def test_verifier_accounting_with_existing_reversals(isolated_db: Session):
         investigation_id="invg_rev_exceed",
         tenant_id="tenant_harden",
         target_type="payment",
-        target_id="PAY-REV-1",
+        target_id="PAY-REV-2",
         classification=InvestigationClassification.REVERSAL_DISCREPANCY,
         executive_summary="Exceeding reversed capacity",
         suggested_resolution=SuggestedResolution(

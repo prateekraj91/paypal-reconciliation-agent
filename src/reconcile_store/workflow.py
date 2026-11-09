@@ -44,6 +44,7 @@ from .repositories import (
 )
 from .approval import ApprovalService, ApprovalResult
 from .canonical import canonical_json
+from .ledger import compute_payment_ledger, effective_domain_returns
 
 from reconcile.interfaces import Matcher
 from reconcile.deterministic import DeterministicMatcher
@@ -548,8 +549,12 @@ class StorageWorkflow:
             matcher=active_matcher,
             existing_allocations=domain_approved_allocs,
             provider_settlements=domain_settlements,
-            refunds=domain_refunds,
-            reversals=domain_reversals,
+            refunds=effective_domain_returns(self.session, tenant_id, db_payments),
+            reversals=(),
+            payment_capacity={
+                pay.provider_payment_id: compute_payment_ledger(self.session, tenant_id, pay).unapplied_minor
+                for pay in db_payments
+            },
         )
 
         # Build ID lookup maps
@@ -602,12 +607,14 @@ class StorageWorkflow:
                             "evidence": [e.code.value for e in candidate.evidence] if candidate.evidence else [],
                         })
 
-            if prop.reasons:
-                prop_evidence = [e.code.value if hasattr(e, "code") else str(e) for e in prop.reasons]
-            elif prop.candidates and prop.candidates[0].evidence:
-                prop_evidence = [e.code.value if hasattr(e, "code") else str(e) for e in prop.candidates[0].evidence]
-            else:
-                prop_evidence = []
+            # A proposed match keeps its candidate evidence: the approval gate
+            # reruns the verifier from these codes. `reasons` only explains it.
+            evidence_items = (
+                prop.candidates[0].evidence
+                if prop.outcome == MatchOutcome.PROPOSED and prop.candidates and prop.candidates[0].evidence
+                else prop.reasons
+            )
+            prop_evidence = [e.code.value if hasattr(e, "code") else str(e) for e in evidence_items]
             prop_rec = self.proposal_repo.create_proposal(
                 tenant_id=tenant_id,
                 run_id=run_rec.id,

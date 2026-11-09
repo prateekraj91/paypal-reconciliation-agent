@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api/client';
 import { AuditEventItem, AuditVerifyResponse } from '../types/api';
-import { HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { HashBadge, LoadingSpinner, EmptyState, LoadErrorBanner } from '../components/Common';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -28,12 +28,15 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
   const [verifyResult, setVerifyResult] = useState<AuditVerifyResponse | null>(null);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Filters
   const [subjectTypeFilter, setSubjectTypeFilter] = useState<string>('');
   const [subjectIdFilter, setSubjectIdFilter] = useState<string>('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listAuditEvents({
         tenantId,
@@ -45,6 +48,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
       setTotalCount(data.total_count || 0);
     } catch (err) {
       console.error('Failed to load audit events:', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setLoading(false);
     }
@@ -90,6 +94,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
 
   return (
     <div className="space-y-6">
+      <LoadErrorBanner message={loadError} />
       {/* Header & Verification Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>

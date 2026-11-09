@@ -9,12 +9,14 @@ Provides:
 from __future__ import annotations
 
 from datetime import datetime, timezone, date
+import hashlib
 import json
 import logging
 import os
 import uuid
 from typing import Any, Optional, List, Dict
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -37,7 +39,7 @@ from reconcile_store.repositories.reconciliation_repo import (
 from reconcile_store.repositories.payment_repo import PaymentRepository, IneligiblePaymentError
 from reconcile_store.repositories.invoice_repo import InvoiceRepository, IneligibleInvoiceError
 from reconcile_store.repositories.audit_repo import AuditRepository
-from reconcile_store.repositories.allocation_repo import AllocationRepository
+from reconcile_store.repositories.allocation_repo import AllocationRepository, LedgerConstraintError
 from reconcile_store.repositories.settlement_repo import ProviderSettlementRepository
 from reconcile_store.repositories.refund_repo import RefundRepository
 from reconcile_store.repositories.investigation_repo import InvestigationRepository
@@ -60,10 +62,16 @@ from reconcile_store.approval import (
     VerificationFailedError,
     ApprovalError,
     ProposalSafetyEvaluation,
-    evaluate_proposal_investigation_safety,
+    evaluate_proposal_approval_eligibility,
 )
+from reconcile_store.ledger import is_completed_return
 from reconcile_store.workflow import StorageWorkflow
-from reconcile_store.repositories.base import ConflictError, StaleVersionError, EntityNotFoundError
+from reconcile_store.repositories.base import (
+    ConflictError,
+    StaleVersionError,
+    EntityNotFoundError,
+    TenantIsolationError,
+)
 from reconcile_api.demo_data import seed_demo_data
 
 from contextlib import asynccontextmanager
@@ -100,11 +108,34 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # The dashboard is served same-origin (or via the Vite proxy) and authenticates
+    # with a bearer token, so no origin is trusted unless explicitly configured.
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(TenantIsolationError)
+def tenant_isolation_handler(request: Request, exc: TenantIsolationError) -> JSONResponse:
+    """Report cross-tenant lookups as not found, without naming the owning tenant."""
+    logger.warning("Blocked cross-tenant lookup on %s", request.url.path)
+    return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Resource not found."})
+
+
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
+
+
+def _decision_idempotency_key(key: str) -> str:
+    """Keep a decision key within its column, without changing keys that already fit."""
+    if len(key) <= MAX_IDEMPOTENCY_KEY_LENGTH:
+        return key
+    return f"sha256:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
 
 REQUIRED_PAYPAL_HEADERS = (
     "PAYPAL-TRANSMISSION-ID",
@@ -368,6 +399,8 @@ async def paypal_webhook(
 
     # 1. Enforce body size limit
     content_length = request.headers.get("content-length")
+    if content_length and not content_length.isdigit():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Content-Length header")
     if content_length and int(content_length) > config.max_request_body_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -753,7 +786,7 @@ def trigger_sync(
 @app.get("/admin/runs", status_code=status.HTTP_200_OK)
 def list_runs(
     tenant_id: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -786,7 +819,7 @@ def list_runs(
 def list_jobs(
     tenant_id: Optional[str] = None,
     status: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -878,7 +911,7 @@ def list_investigations(
     tenant_id: Optional[str] = None,
     status: Optional[str] = None,
     target_type: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -1012,8 +1045,8 @@ def get_dashboard_summary(
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
         bucket["unapplied_cash_minor"] += unapplied
         bucket["unapplied_amount_minor"] += unapplied
-        allocated = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
-        bucket["reconciled_amount_minor"] += allocated
+        ledger = pay_repo.get_ledger(effective_tenant, p.id)
+        bucket["reconciled_amount_minor"] += ledger.net_applied_minor
 
         if unapplied > 0:
             open_exceptions_list.append({
@@ -1024,9 +1057,9 @@ def get_dashboard_summary(
                 "payer_name": p.payer_name,
                 "unapplied_cash_minor": unapplied,
                 "received_at": p.received_at.isoformat() if p.received_at else None,
-                "status": "UNMATCHED" if unapplied == p.amount_minor else "PARTIAL",
+                "status": "UNMATCHED" if unapplied == ledger.net_cash_minor else "PARTIAL",
             })
-            if unapplied == p.amount_minor:
+            if unapplied == ledger.net_cash_minor:
                 unmatched_count += 1
             else:
                 partially_reconciled_count += 1
@@ -1056,18 +1089,8 @@ def get_dashboard_summary(
             rejected_proposals += 1
         else:
             pending_proposals += 1
-            # Actionable: PROPOSED outcome with verified safety checks and non-empty allocations
-            safety_eval = evaluate_proposal_investigation_safety(
-                session=session,
-                tenant_id=effective_tenant,
-                proposal=prop,
-            )
-            if (
-                prop.outcome == "PROPOSED"
-                and prop.verifier_status == "VERIFIED"
-                and safety_eval.approval_eligible
-                and len(prop.allocations) > 0
-            ):
+            # Actionable: approval would succeed against current ledger state
+            if evaluate_proposal_approval_eligibility(session, effective_tenant, prop).approval_eligible:
                 actionable_proposals += 1
 
     invg_needs_review = sum(1 for i in investigations if i.status == "NEEDS_REVIEW")
@@ -1128,8 +1151,8 @@ def list_transactions(
     record_type: Optional[str] = None,
     currency: Optional[str] = None,
     search: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -1176,8 +1199,9 @@ def list_transactions(
     filtered_transactions = []
     for p in all_payments:
         p_refunds = refunds_by_payment.get(p.id, [])
-        refund_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REFUND")
-        reversal_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REVERSAL")
+        completed_returns = [r for r in p_refunds if is_completed_return(r)]
+        refund_minor = sum(r.amount_minor for r in completed_returns if r.record_type == "REFUND")
+        reversal_minor = sum(r.amount_minor for r in completed_returns if r.record_type == "REVERSAL")
         is_settled = p.id in settled_payment_ids or p.provider_payment_id in settled_payment_ids
         dispute_id = next((r.dispute_id for r in p_refunds if r.dispute_id), None)
 
@@ -1403,9 +1427,10 @@ def get_transaction(
         for a in audit_events
     ]
 
-    refund_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REFUND")
-    reversal_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REVERSAL")
-    dispute_id = next((r.get("dispute_id") for r in ref_list if r.get("dispute_id")), None)
+    completed_returns = [r for r in refunds if is_completed_return(r)]
+    refund_minor = sum(r.amount_minor for r in completed_returns if r.record_type == "REFUND")
+    reversal_minor = sum(r.amount_minor for r in completed_returns if r.record_type == "REVERSAL")
+    dispute_id = next((r.dispute_id for r in refunds if r.dispute_id), None)
     is_settled = len(sett_list) > 0
 
     if reversal_minor > 0:
@@ -1465,8 +1490,8 @@ def list_invoices(
     status: Optional[str] = None,
     currency: Optional[str] = None,
     search: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -1497,7 +1522,7 @@ def list_invoices(
         settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
         returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
         outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
-        net_applied = max(0, (allocated + settled) - returns)
+        net_applied = inv_repo.get_net_applied_minor(effective_tenant, inv.id)
 
         if outstanding == 0:
             reconciliation_status = "FULLY_RECONCILED"
@@ -1577,7 +1602,7 @@ def get_invoice(
     settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
     returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
     outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
-    net_applied = max(0, (allocated + settled) - returns)
+    net_applied = inv_repo.get_net_applied_minor(effective_tenant, inv.id)
 
     if outstanding == 0:
         reconciliation_status = "FULLY_RECONCILED"
@@ -1729,15 +1754,9 @@ def _enrich_proposal_payload(
     ambiguity_cert = json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None
 
     # Evaluate linked investigation safety gate
-    safety_eval = evaluate_proposal_investigation_safety(
-        session=session,
-        tenant_id=effective_tenant,
-        proposal=p,
-        payment=pay,
-        proposed_allocs=p.allocations,
-    )
+    safety_eval = evaluate_proposal_approval_eligibility(session, effective_tenant, p, payment=pay)
 
-    # Surface authoritative investigation alerts in evidence
+    # Surface authoritative approval blocks in evidence
     if safety_eval.effective_verifier_status == "INVALID":
         crit_msg = f"[CRITICAL] {safety_eval.approval_prohibited_reason}"
         if crit_msg not in evidence and not any("prompt injection" in str(e).lower() for e in evidence):
@@ -1778,8 +1797,6 @@ def _enrich_proposal_payload(
                 ),
             )).first()
             if cinv:
-                cinv_alloc = inv_repo.get_total_allocated_minor(effective_tenant, cinv.id)
-                cinv_sett = inv_repo.get_total_settled_minor(effective_tenant, cinv.id)
                 cand_details.append({
                     "id": cinv.id,
                     "invoice_number": cinv.invoice_number,
@@ -1788,7 +1805,7 @@ def _enrich_proposal_payload(
                     "customer_email": cinv.customer_email,
                     "total_minor": cinv.total_minor,
                     "currency": cinv.currency,
-                    "outstanding_minor": max(0, cinv.total_minor - (cinv_alloc + cinv_sett)),
+                    "outstanding_minor": inv_repo.get_ledger_outstanding_minor(effective_tenant, cinv.id),
                     "score": ambiguity_cert.get("candidate_scores", {}).get(cid, 0),
                     "memo": cinv.memo,
                 })
@@ -1883,8 +1900,8 @@ def list_proposals(
     status: Optional[str] = None,
     run_id: Optional[str] = None,
     payment_id: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
@@ -1939,9 +1956,19 @@ def list_proposals(
             "created_at": p.created_at.isoformat() if p.created_at else None,
         })
 
+    total_count = len(
+        prop_repo.list_proposals(
+            tenant_id=effective_tenant,
+            status=status,
+            run_id=run_id,
+            payment_id=payment_id,
+            limit=None,
+        )
+    )
+
     return {
         "proposals": items,
-        "total_count": len(items),
+        "total_count": total_count,
         "limit": limit,
         "offset": offset,
     }
@@ -2046,7 +2073,7 @@ def approve_proposal(
     effective_tenant = request.tenant_id or config.default_tenant_id
 
     approval_service = ApprovalService(session)
-    idempotency_key = f"approval:{effective_tenant}:{proposal_id}:{request.reviewer}"
+    idempotency_key = _decision_idempotency_key(f"approval:{effective_tenant}:{proposal_id}:{request.reviewer}")
 
     try:
         res = approval_service.approve_proposal(
@@ -2071,10 +2098,15 @@ def approve_proposal(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except (ConflictError, StaleVersionError) as exc:
+    except (ConflictError, StaleVersionError, LedgerConstraintError) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
+        ) from exc
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Proposal '{proposal_id}' not found for tenant '{effective_tenant}'.",
         ) from exc
 
     return {
@@ -2099,7 +2131,7 @@ def reject_proposal(
     effective_tenant = request.tenant_id or config.default_tenant_id
 
     approval_service = ApprovalService(session)
-    idempotency_key = f"rejection:{effective_tenant}:{proposal_id}:{request.reviewer}"
+    idempotency_key = _decision_idempotency_key(f"rejection:{effective_tenant}:{proposal_id}:{request.reviewer}")
 
     try:
         dec = approval_service.reject_proposal(
@@ -2109,6 +2141,13 @@ def reject_proposal(
             idempotency_key=idempotency_key,
             reason=request.reason,
         )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Proposal '{proposal_id}' not found for tenant '{effective_tenant}'.",
+        ) from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2494,7 +2533,7 @@ def approve_investigation(
 
     # 4. Atomic Execution via ApprovalService (Requirement 2D)
     approval_service = ApprovalService(session)
-    idempotency_key = f"invg-approval:{effective_tenant}:{investigation_id}:{target_prop.id}"
+    idempotency_key = _decision_idempotency_key(f"invg-approval:{effective_tenant}:{investigation_id}:{target_prop.id}")
     try:
         approval_res = approval_service.approve_proposal(
             tenant_id=effective_tenant,
@@ -2597,8 +2636,8 @@ def list_audit_events(
     tenant_id: Optional[str] = None,
     subject_type: Optional[str] = None,
     subject_id: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     _auth: str = Depends(require_admin_auth),
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
