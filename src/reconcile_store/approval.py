@@ -10,7 +10,7 @@ from typing import Optional, Sequence, Any, Dict, List, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import Session
 
 from .schema import (
@@ -24,11 +24,12 @@ from .schema import (
     DecisionRecord,
     VerificationRecord,
     AuditEventRecord,
+    RefundRecord,
 )
 from .canonical import canonical_json
 from .repositories.base import EntityNotFoundError, ConflictError, StaleVersionError, TenantIsolationError
-from .repositories.invoice_repo import IneligibleInvoiceError
-from .repositories.payment_repo import IneligiblePaymentError
+from .repositories.invoice_repo import InvoiceRepository, IneligibleInvoiceError
+from .repositories.payment_repo import PaymentRepository, IneligiblePaymentError
 from .repositories.allocation_repo import LedgerConstraintError
 from .repositories.audit_repo import AuditRepository
 
@@ -43,6 +44,8 @@ from reconcile.models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
+    Refund,
+    PaymentReversal,
 )
 from reconcile.verifier import verify_proposals, VerificationResult
 
@@ -329,12 +332,44 @@ class ApprovalService:
                 outcome=MatchOutcome.PROPOSED,
             )
 
+            # Load completed refunds and reversals affecting these invoices and payments
+            linked_pay_db_ids = {eda.payment_id for eda in existing_db_allocs}
+            for eds in existing_db_settlements:
+                if eds.payment_id:
+                    linked_pay_db_ids.add(eds.payment_id)
+
+            ref_conditions = [RefundRecord.invoice_id.in_(affected_invoice_ids)]
+            if linked_pay_db_ids:
+                ref_conditions.append(
+                    RefundRecord.parent_payment_id.in_(list(linked_pay_db_ids))
+                )
+
+            stmt_exist_refs = select(RefundRecord).where(
+                RefundRecord.tenant_id == tenant_id,
+                RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
+                or_(*ref_conditions),
+            )
+            db_refund_recs = self.session.scalars(stmt_exist_refs).all()
+            domain_refunds: List[Refund] = []
+            domain_reversals: List[PaymentReversal] = []
+            for r in db_refund_recs:
+                r_pay = self.session.get(PaymentRecord, r.parent_payment_id) if r.parent_payment_id else None
+                pay_id_str = r_pay.provider_payment_id if r_pay else "unknown"
+                r_inv = self.session.get(InvoiceRecord, r.invoice_id) if r.invoice_id else None
+                inv_id_str = r_inv.provider_invoice_id if r_inv else None
+                if getattr(r, "record_type", "REFUND") == "REVERSAL":
+                    domain_reversals.append(r.to_reversal_domain(pay_id_str, inv_id_str))
+                else:
+                    domain_refunds.append(r.to_domain(pay_id_str, inv_id_str))
+
             # Run independent verifier inside the transaction
             verification_results = verify_proposals(
                 proposals=[domain_proposal],
                 payments=[domain_payment],
                 invoices=domain_invoices,
                 existing_allocations=domain_existing_allocs,
+                refunds=domain_refunds,
+                reversals=domain_reversals,
             )
 
             if not verification_results or not verification_results[0].passed:
@@ -344,25 +379,18 @@ class ApprovalService:
             # ------------------------------------------------------------------
             # STEP 5 & 6: Recalculate allocation amounts and check capacities
             # ------------------------------------------------------------------
-            # Calculate current payment allocations + provider settlements
-            stmt_curr_pay_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
-                AllocationRecord.tenant_id == tenant_id,
-                AllocationRecord.payment_id == payment.id,
-            )
-            stmt_curr_pay_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
-                ProviderSettlementRecord.tenant_id == tenant_id,
-                ProviderSettlementRecord.payment_id == payment.id,
-            )
-            current_pay_allocated = int(self.session.scalar(stmt_curr_pay_alloc) or 0) + int(self.session.scalar(stmt_curr_pay_sett) or 0)
+            pay_repo = PaymentRepository(self.session)
+            unapplied_cash = pay_repo.get_unapplied_cash_minor(tenant_id, payment.id)
             proposed_pay_total = sum(pa.amount_minor for pa in proposed_allocs)
 
-            if current_pay_allocated + proposed_pay_total > payment.amount_minor:
+            if proposed_pay_total > unapplied_cash:
                 raise LedgerConstraintError(
-                    f"Payment capacity exceeded (I2): payment amount {payment.amount_minor} minor units, "
-                    f"already allocated/settled {current_pay_allocated}, proposed {proposed_pay_total}"
+                    f"Payment capacity exceeded (I2): payment '{payment.provider_payment_id}' unapplied cash "
+                    f"{unapplied_cash} minor units, proposed {proposed_pay_total}"
                 )
 
             # Calculate capacity per invoice and ensure no duplicate provider settlement
+            inv_repo = InvoiceRepository(self.session)
             for pa in proposed_allocs:
                 inv = invoices_by_id[pa.invoice_id]
 
@@ -381,19 +409,11 @@ class ApprovalService:
                         f"already settled by provider."
                     )
 
-                stmt_curr_inv_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
-                    AllocationRecord.tenant_id == tenant_id,
-                    AllocationRecord.invoice_id == inv.id,
-                )
-                stmt_curr_inv_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
-                    ProviderSettlementRecord.tenant_id == tenant_id,
-                    ProviderSettlementRecord.invoice_id == inv.id,
-                )
-                curr_inv_allocated = int(self.session.scalar(stmt_curr_inv_alloc) or 0) + int(self.session.scalar(stmt_curr_inv_sett) or 0)
-                if curr_inv_allocated + pa.amount_minor > inv.total_minor:
+                outstanding = inv_repo.get_ledger_outstanding_minor(tenant_id, inv.id)
+                if pa.amount_minor > outstanding:
                     raise LedgerConstraintError(
                         f"Invoice capacity exceeded (I3): invoice '{inv.provider_invoice_id}' total {inv.total_minor}, "
-                        f"already allocated/settled {curr_inv_allocated}, proposed {pa.amount_minor}"
+                        f"outstanding balance {outstanding}, proposed {pa.amount_minor}"
                     )
 
             # ------------------------------------------------------------------

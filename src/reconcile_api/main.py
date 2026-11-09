@@ -1031,9 +1031,7 @@ def get_dashboard_summary(
         bucket = get_currency_bucket(inv.currency)
         bucket["invoices_count"] += 1
         bucket["invoices_amount_minor"] += inv.total_minor
-        inv_alloc = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
-        inv_sett = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
-        outstanding = max(0, inv.total_minor - (inv_alloc + inv_sett))
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
         bucket["invoices_outstanding_minor"] += outstanding
 
     stmt_props = select(ProposalRecord).where(ProposalRecord.tenant_id == effective_tenant)
@@ -1482,9 +1480,17 @@ def list_invoices(
     for inv in all_invoices:
         allocated = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
         settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
-        outstanding = max(0, inv.total_minor - (allocated + settled))
+        returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
+        net_applied = max(0, (allocated + settled) - returns)
 
-        reconciliation_status = "FULLY_RECONCILED" if outstanding == 0 else ("PARTIAL" if (allocated + settled) > 0 else "OPEN")
+        if outstanding == 0:
+            reconciliation_status = "FULLY_RECONCILED"
+        elif net_applied > 0:
+            reconciliation_status = "PARTIAL"
+        else:
+            reconciliation_status = "OPEN"
+
         if status:
             norm_s = status.strip().upper()
             if norm_s in ("FULLY_RECONCILED", "OPEN", "PARTIAL"):
@@ -1510,6 +1516,8 @@ def list_invoices(
             "memo": inv.memo,
             "allocated_minor": allocated,
             "settled_minor": settled,
+            "refunded_minor": returns,
+            "net_applied_minor": net_applied,
             "outstanding_balance_minor": outstanding,
             "reconciliation_status": reconciliation_status,
         })
@@ -1552,7 +1560,16 @@ def get_invoice(
 
     allocated = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
     settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
-    outstanding = max(0, inv.total_minor - (allocated + settled))
+    returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
+    outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
+    net_applied = max(0, (allocated + settled) - returns)
+
+    if outstanding == 0:
+        reconciliation_status = "FULLY_RECONCILED"
+    elif net_applied > 0:
+        reconciliation_status = "PARTIAL"
+    else:
+        reconciliation_status = "OPEN"
 
     # Allocations against this invoice
     stmt_alloc = select(AllocationRecord).where(
@@ -1591,6 +1608,38 @@ def get_invoice(
         for s in settlements
     ]
 
+    # Refunds & Reversals against this invoice or its allocations
+    alloc_ids = [a.id for a in allocs]
+    sett_ids = [s.id for s in settlements]
+    ref_conditions = [RefundRecord.invoice_id == inv.id]
+    if alloc_ids:
+        ref_conditions.append(RefundRecord.allocation_id.in_(alloc_ids))
+    if sett_ids:
+        ref_conditions.append(RefundRecord.settlement_id.in_(sett_ids))
+    linked_pays = [a.payment_id for a in allocs] + [s.payment_id for s in settlements if s.payment_id]
+    if linked_pays:
+        ref_conditions.append(RefundRecord.parent_payment_id.in_(linked_pays))
+
+    stmt_ref = select(RefundRecord).where(
+        RefundRecord.tenant_id == effective_tenant,
+        RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
+        or_(*ref_conditions),
+    )
+    refunds = session.scalars(stmt_ref).all()
+    ref_list = [
+        {
+            "id": r.id,
+            "provider_refund_id": r.provider_refund_id,
+            "parent_payment_id": r.parent_payment_id,
+            "amount_minor": r.amount_minor,
+            "currency": r.currency,
+            "status": r.status,
+            "record_type": getattr(r, "record_type", "REFUND"),
+            "refunded_at": r.refunded_at.isoformat() if r.refunded_at else None,
+        }
+        for r in refunds
+    ]
+
     return {
         "id": inv.id,
         "provider": inv.provider,
@@ -1607,9 +1656,13 @@ def get_invoice(
         "memo": inv.memo,
         "allocated_minor": allocated,
         "settled_minor": settled,
+        "refunded_minor": returns,
+        "net_applied_minor": net_applied,
         "outstanding_balance_minor": outstanding,
+        "reconciliation_status": reconciliation_status,
         "allocations": alloc_list,
         "settlements": sett_list,
+        "refunds": ref_list,
     }
 
 
