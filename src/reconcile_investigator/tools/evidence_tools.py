@@ -772,7 +772,11 @@ class EvidenceToolKit:
                         "why_needed": "Payer email could disambiguate between customers with identical names",
                     })
                 # Check if raw provider record exists
-                p_recs = self.get_provider_records(record_kind="payment", provider_record_id=pay_detail["payment_id"])
+                p_recs = [
+                    r
+                    for r in self.get_provider_records(provider_record_id=pay_detail["payment_id"])
+                    if r["metadata"]["record_kind"].split(".")[0] == "payment"
+                ]
                 if not p_recs:
                     missing.append({
                         "missing_item": "RAW_PROVIDER_RECORD",

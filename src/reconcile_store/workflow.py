@@ -41,6 +41,10 @@ from .repositories import (
     RefundRepository,
     InvestigationRepository,
     AuditRepository,
+    PaymentObservation,
+    SETTLED_PAYER_PLACEHOLDER,
+    SOURCE_INVOICE_EMBEDDED,
+    SOURCE_UNSPECIFIED,
 )
 from .approval import ApprovalService, ApprovalResult
 from .canonical import canonical_json
@@ -69,6 +73,20 @@ class IngestionResult:
     invoices_ingested: int
     payments_ingested: int
     provider_records_ingested: int
+
+
+def _embedded_payment_time(raw: Dict[str, Any]) -> Optional[datetime]:
+    """When the invoice view says the payment happened, if it says so readably."""
+    for key, suffix in (("payment_date_time", ""), ("payment_date", "T00:00:00+00:00")):
+        value = raw.get(key)
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(f"{value}{suffix}".replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
 
 
 class StorageWorkflow:
@@ -108,6 +126,8 @@ class StorageWorkflow:
                     record_kind="invoice",
                     provider_record_id=inv.invoice_id,
                     raw_payload=raw_payloads[inv.invoice_id],
+                    # An invoice legitimately changes (for example when paid); each revision is kept.
+                    fail_on_conflict=False,
                 )
                 source_rec_id = raw_record.id
 
@@ -138,39 +158,75 @@ class StorageWorkflow:
         payments: Sequence[Payment],
         raw_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
         provider: str = "paypal",
+        source_view: str = SOURCE_UNSPECIFIED,
     ) -> List[PaymentRecord]:
         """Ingest canonical domain payments, preserving original provider raw evidence."""
         results: List[PaymentRecord] = []
         for pay in payments:
-            source_rec_id: Optional[str] = None
-            if raw_payloads and pay.payment_id in raw_payloads:
-                raw_record = self.provider_record_repo.store_record(
-                    tenant_id=tenant_id,
-                    provider=provider,
-                    record_kind="payment",
-                    provider_record_id=pay.payment_id,
-                    raw_payload=raw_payloads[pay.payment_id],
-                )
-                source_rec_id = raw_record.id
-
-            pay_rec = self.payment_repo.upsert_payment(
-                tenant_id=tenant_id,
-                provider=provider,
-                provider_payment_id=pay.payment_id,
-                amount_minor=pay.amount_cents,
-                currency=pay.currency,
-                status=pay.status.value,
-                payer_name=pay.payer_name,
-                payer_email=pay.payer_email,
-                reference=pay.reference,
-                note=pay.note,
-                received_at=pay.received_at,
-                source_record_id=source_rec_id,
+            source_rec_id = self._store_payment_source(
+                tenant_id, provider, source_view, pay.payment_id, raw_payloads
+            )
+            pay_rec = self._merge_payment(
+                tenant_id,
+                provider,
+                PaymentObservation(
+                    provider_payment_id=pay.payment_id,
+                    amount_minor=pay.amount_cents,
+                    currency=pay.currency,
+                    source_view=source_view,
+                    status=pay.status.value,
+                    payer_name=pay.payer_name,
+                    payer_email=pay.payer_email,
+                    reference=pay.reference,
+                    note=pay.note,
+                    received_at=pay.received_at,
+                    source_record_id=source_rec_id,
+                ),
             )
             results.append(pay_rec)
 
         self.session.commit()
         return results
+
+    def _store_payment_source(
+        self,
+        tenant_id: str,
+        provider: str,
+        source_view: str,
+        provider_payment_id: str,
+        raw_payloads: Optional[Dict[str, Dict[str, Any]]],
+    ) -> Optional[str]:
+        """Keep this view's evidence. A changed payload is a new revision, never an overwrite."""
+        if not raw_payloads or provider_payment_id not in raw_payloads:
+            return None
+        return self.provider_record_repo.store_record(
+            tenant_id=tenant_id,
+            provider=provider,
+            record_kind=source_view,
+            provider_record_id=provider_payment_id,
+            raw_payload=raw_payloads[provider_payment_id],
+            fail_on_conflict=source_view == SOURCE_UNSPECIFIED,
+        ).id
+
+    def _merge_payment(
+        self, tenant_id: str, provider: str, observation: PaymentObservation
+    ) -> PaymentRecord:
+        payment, changed = self.payment_repo.merge_observation(tenant_id, provider, observation)
+        if changed:
+            self.audit_repo.append_event(
+                tenant_id=tenant_id,
+                event_type="PAYMENT_SOURCE_MERGED",
+                actor=f"{provider}:ingestion",
+                subject_type="payment",
+                subject_id=payment.id,
+                details={
+                    "provider_payment_id": payment.provider_payment_id,
+                    "source_view": observation.source_view,
+                    "source_record_id": observation.source_record_id,
+                    "fields_changed": sorted(changed),
+                },
+            )
+        return payment
 
     def ingest_provider_settlements(
         self,
@@ -191,32 +247,34 @@ class StorageWorkflow:
             if inv is None:
                 continue
 
-            # Store embedded payment transaction as an immutable provider record
-            source_rec_id: Optional[str] = None
-            if raw_payloads and alloc.payment_id in raw_payloads:
-                raw_rec = self.provider_record_repo.store_record(
-                    tenant_id=tenant_id,
-                    provider=provider,
-                    record_kind="payment",
-                    provider_record_id=alloc.payment_id,
-                    raw_payload=raw_payloads[alloc.payment_id],
-                )
-                source_rec_id = raw_rec.id
-
-            pay = self.payment_repo.get_by_provider_id(tenant_id, provider, alloc.payment_id)
-            if pay is None:
-                pay = self.payment_repo.upsert_payment(
-                    tenant_id=tenant_id,
-                    provider=provider,
+            # The invoice view reports each invoice's share, so a payment split across
+            # invoices is compared to its gross as the total of those shares.
+            raw = (raw_payloads or {}).get(alloc.payment_id) or {}
+            source_rec_id = self._store_payment_source(
+                tenant_id, provider, SOURCE_INVOICE_EMBEDDED, alloc.payment_id, raw_payloads
+            )
+            pay = self._merge_payment(
+                tenant_id,
+                provider,
+                PaymentObservation(
                     provider_payment_id=alloc.payment_id,
-                    amount_minor=alloc.amount_cents,
+                    amount_minor=self._settled_total_minor(
+                        tenant_id, provider, environment, alloc, allocations
+                    ),
                     currency=alloc.currency or inv.currency or "USD",
+                    source_view=SOURCE_INVOICE_EMBEDDED,
                     status="COMPLETED",
-                    payer_name="PayPal Settled Payment",
+                    payer_name=SETTLED_PAYER_PLACEHOLDER,
+                    reference=inv.invoice_number,
+                    note=str(raw.get("note") or ""),
+                    received_at=_embedded_payment_time(raw),
                     source_record_id=source_rec_id,
-                )
-            elif source_rec_id and not pay.source_record_id:
-                pay.source_record_id = source_rec_id
+                ),
+            )
+
+            already_recorded = self.settlement_repo.find_settlement(
+                tenant_id, provider, environment, inv.id, alloc.payment_id
+            )
 
             # Upsert into dedicated provider_settlements table
             settlement = self.settlement_repo.upsert_settlement(
@@ -232,6 +290,8 @@ class StorageWorkflow:
                 evidence=["PROVIDER_SETTLED"],
             )
             results.append(settlement)
+            if already_recorded is not None:
+                continue
 
             # Record audit event for settlement ingestion without operator approval misrepresentation
             self.audit_repo.append_event(
@@ -255,6 +315,33 @@ class StorageWorkflow:
 
         self.session.commit()
         return results
+
+    def _settled_total_minor(
+        self,
+        tenant_id: str,
+        provider: str,
+        environment: str,
+        alloc: PaymentAllocation,
+        batch: Sequence[PaymentAllocation],
+    ) -> int:
+        """Total of one payment's invoice shares: this batch plus shares already on record."""
+        batch_invoice_rows = {
+            a.invoice_id: a.amount_cents for a in batch if a.payment_id == alloc.payment_id
+        }
+        batch_ids = {
+            inv.id: inv.provider_invoice_id
+            for inv in (
+                self.invoice_repo.get_by_provider_id(tenant_id, provider, provider_id)
+                for provider_id in batch_invoice_rows
+            )
+            if inv is not None
+        }
+        stored = self.settlement_repo.list_for_provider_payment(
+            tenant_id, provider, environment, alloc.payment_id
+        )
+        return sum(batch_invoice_rows[pid] for pid in batch_ids.values()) + sum(
+            s.amount_minor for s in stored if s.invoice_id not in batch_ids
+        )
 
     def ingest_provider_allocations(
         self,

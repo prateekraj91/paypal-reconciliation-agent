@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Sequence
 from datetime import datetime, timezone
 import uuid
@@ -10,11 +11,66 @@ from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError, ConflictError
 from ..ledger import PaymentLedger, compute_payment_ledger
-from ..schema import PaymentRecord, AllocationRecord
+from ..schema import PaymentRecord, AllocationRecord, ProviderRecord
+
+# A provider source record is identified by (kind, provider id, content hash): one
+# genuine transaction has one record per provider view and per revision of that view.
+# The canonical payment is identified by the provider transaction id alone.
+SOURCE_UNSPECIFIED = "payment"
+SOURCE_TRANSACTION_SEARCH = "payment.transaction_search"
+SOURCE_WEBHOOK_CAPTURE = "payment.webhook_capture"
+SOURCE_INVOICE_EMBEDDED = "payment.invoice_embedded"
+
+# Which view is trusted for descriptive fields, independent of arrival order.
+_SOURCE_RANK = {
+    SOURCE_UNSPECIFIED: 0,
+    SOURCE_INVOICE_EMBEDDED: 10,
+    SOURCE_WEBHOOK_CAPTURE: 20,
+    SOURCE_TRANSACTION_SEARCH: 30,
+}
+_GROSS_SOURCES = frozenset({SOURCE_WEBHOOK_CAPTURE, SOURCE_TRANSACTION_SEARCH})
+
+# Labels written when a view has no payer. They are not information about the payer.
+SETTLED_PAYER_PLACEHOLDER = "PayPal Settled Payment"
+_PAYER_PLACEHOLDERS = frozenset({SETTLED_PAYER_PLACEHOLDER, "PayPal Customer"})
 
 
 class IneligiblePaymentError(Exception):
     """Raised when a payment is ineligible for allocation (e.g. PENDING, DENIED, REFUNDED)."""
+
+
+class PaymentSourceConflictError(ConflictError):
+    """Two views of one provider transaction disagree about immutable money facts."""
+
+
+@dataclass(frozen=True)
+class PaymentObservation:
+    """What one provider view reports about one transaction."""
+
+    provider_payment_id: str
+    amount_minor: int
+    currency: str
+    source_view: str = SOURCE_UNSPECIFIED
+    status: Optional[str] = None
+    payer_name: str = ""
+    payer_email: Optional[str] = None
+    reference: Optional[str] = None
+    note: str = ""
+    received_at: Optional[datetime] = None
+    source_record_id: Optional[str] = None
+
+
+def _carries_information(field_name: str, value: object) -> bool:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return False
+    return not (field_name == "payer_name" and value in _PAYER_PLACEHOLDERS)
+
+
+def _same_value(current: object, incoming: object) -> bool:
+    if isinstance(current, datetime) and isinstance(incoming, datetime):
+        current = current if current.tzinfo else current.replace(tzinfo=timezone.utc)
+        incoming = incoming if incoming.tzinfo else incoming.replace(tzinfo=timezone.utc)
+    return current == incoming
 
 
 class PaymentRepository(BaseRepository[PaymentRecord]):
@@ -111,6 +167,115 @@ class PaymentRepository(BaseRepository[PaymentRecord]):
         self.session.add(new_payment)
         self.session.flush()
         return new_payment
+
+    def merge_observation(
+        self, tenant_id: str, provider: str, observation: PaymentObservation
+    ) -> tuple[PaymentRecord, tuple[str, ...]]:
+        """Fold one provider view into the canonical payment; returns it and the fields changed.
+
+        The result does not depend on arrival order: a field is taken from the
+        highest-ranked view that actually has a value, so a weaker view only fills
+        gaps and an empty value never erases anything. Currency and gross amount
+        are immutable and fail closed when views disagree.
+        """
+        obs = observation
+        currency = (obs.currency or "").strip().upper()
+        existing = self.session.scalars(
+            select(PaymentRecord)
+            .where(
+                PaymentRecord.tenant_id == tenant_id,
+                PaymentRecord.provider == provider,
+                PaymentRecord.provider_payment_id == obs.provider_payment_id,
+            )
+            .with_for_update()
+        ).first()
+        if existing is None:
+            created = self.upsert_payment(
+                tenant_id=tenant_id,
+                provider=provider,
+                provider_payment_id=obs.provider_payment_id,
+                amount_minor=obs.amount_minor,
+                currency=currency,
+                status=obs.status or "COMPLETED",
+                payer_name=obs.payer_name,
+                payer_email=obs.payer_email,
+                reference=obs.reference,
+                note=obs.note,
+                received_at=obs.received_at,
+                source_record_id=obs.source_record_id,
+            )
+            return created, ()
+
+        stored_views = set(
+            self.session.scalars(
+                select(ProviderRecord.record_kind)
+                .where(
+                    ProviderRecord.tenant_id == tenant_id,
+                    ProviderRecord.provider == provider,
+                    ProviderRecord.provider_record_id == obs.provider_payment_id,
+                )
+                .distinct()
+            ).all()
+        )
+        self._assert_financial_identity(existing, obs, currency, stored_views)
+
+        rank = _SOURCE_RANK[obs.source_view]
+        outranked = any(_SOURCE_RANK.get(v, 0) > rank for v in stored_views)
+        changed: list[str] = []
+        if (
+            obs.source_view == SOURCE_INVOICE_EMBEDDED
+            and obs.amount_minor > existing.amount_minor
+        ):
+            existing.amount_minor = obs.amount_minor
+            changed.append("amount_minor")
+        for name in ("status", "payer_name", "payer_email", "reference", "note", "received_at"):
+            incoming = getattr(obs, name)
+            if not _carries_information(name, incoming):
+                continue
+            current = getattr(existing, name)
+            if _same_value(current, incoming):
+                continue
+            if not outranked or not _carries_information(name, current):
+                setattr(existing, name, incoming)
+                changed.append(name)
+        if obs.source_record_id and existing.source_record_id != obs.source_record_id:
+            if not outranked or existing.source_record_id is None:
+                existing.source_record_id = obs.source_record_id
+                changed.append("source_record_id")
+        if changed:
+            existing.version += 1
+            existing.updated_at = datetime.now(timezone.utc)
+            self.session.flush()
+        return existing, tuple(changed)
+
+    @staticmethod
+    def _assert_financial_identity(
+        existing: PaymentRecord,
+        obs: PaymentObservation,
+        currency: str,
+        stored_views: set[str],
+    ) -> None:
+        if existing.currency != currency:
+            raise PaymentSourceConflictError(
+                f"Cannot change currency of payment '{obs.provider_payment_id}': source "
+                f"'{obs.source_view}' reports '{currency}' but the canonical payment is "
+                f"'{existing.currency}'. Refusing to merge."
+            )
+        if obs.amount_minor == existing.amount_minor:
+            return
+        if obs.source_view == SOURCE_INVOICE_EMBEDDED:
+            has_gross = bool(stored_views & _GROSS_SOURCES)
+            only_embedded = SOURCE_INVOICE_EMBEDDED in stored_views and not has_gross
+            if only_embedded and obs.amount_minor > existing.amount_minor:
+                return  # another invoice's share of a split payment arrived later
+            if not has_gross and obs.amount_minor < existing.amount_minor:
+                return  # a settlement against a payment with no recorded gross view
+        raise PaymentSourceConflictError(
+            f"Conflicting payment amount for '{obs.provider_payment_id}': source "
+            f"'{obs.source_view}' reports {obs.amount_minor} minor units but the canonical "
+            f"payment has {existing.amount_minor} minor units ({existing.currency}). "
+            f"Financial payment identity cannot be silently mutated (I5)."
+        )
 
     def get_payment(self, tenant_id: str, payment_id: str) -> Optional[PaymentRecord]:
         payment = self.session.get(PaymentRecord, payment_id)

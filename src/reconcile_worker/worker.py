@@ -30,7 +30,12 @@ from reconcile_store.db import DatabaseEngine
 from reconcile_store.repositories.job_repo import JobRepository
 from reconcile_store.repositories.webhook_repo import WebhookInboxRepository
 from reconcile_store.repositories.invoice_repo import InvoiceRepository
-from reconcile_store.repositories.payment_repo import PaymentRepository
+from reconcile_store.repositories.payment_repo import (
+    PaymentRepository,
+    PaymentSourceConflictError,
+    SOURCE_TRANSACTION_SEARCH,
+    SOURCE_WEBHOOK_CAPTURE,
+)
 from reconcile_store.repositories.tenant_repo import ConnectionRepository
 from reconcile_store.workflow import StorageWorkflow
 from reconcile_store.schema import JobRecord, ConnectionRecord, _utcnow
@@ -226,7 +231,9 @@ class Worker:
                 logger.info("Successfully completed job %s", job_id)
                 return job
 
-            except PermanentJobError as exc:
+            except (PermanentJobError, PaymentSourceConflictError) as exc:
+                # A provider disagreement about money does not resolve itself on retry.
+                session.rollback()
                 err_msg = str(exc)
                 logger.warning("Job %s permanently failed: %s", job_id, err_msg)
                 job_repo.fail_job(job_id, self.worker_id, err_msg)
@@ -449,6 +456,7 @@ class Worker:
                             tenant_id=tenant_id,
                             payments=[payment],
                             raw_payloads={payment.payment_id: resource},
+                            source_view=SOURCE_WEBHOOK_CAPTURE,
                         )
                         raise InvoiceNotYetAvailableError(
                             f"Payment '{capture_id}' arrived for invoice '{invoice_ref}' which is not yet available."
@@ -459,6 +467,7 @@ class Worker:
                             tenant_id=tenant_id,
                             payments=[payment],
                             raw_payloads={payment.payment_id: resource},
+                            source_view=SOURCE_WEBHOOK_CAPTURE,
                         )
                         raise RetryableJobError(
                             f"Failed to check referenced invoice '{invoice_ref}': {exc}"
@@ -469,6 +478,7 @@ class Worker:
                 tenant_id=tenant_id,
                 payments=[payment],
                 raw_payloads={payment.payment_id: resource},
+                source_view=SOURCE_WEBHOOK_CAPTURE,
             )
             workflow.run_reconciliation(tenant_id=tenant_id)
             return
@@ -697,14 +707,11 @@ class Worker:
             )
 
         if sync_result.payments:
-            combined_payment_evidence = {
-                **dict(sync_result.embedded_payment_evidence),
-                **dict(sync_result.transaction_evidence),
-            }
             workflow.ingest_payments(
                 tenant_id=tenant_id,
                 payments=sync_result.payments,
-                raw_payloads=combined_payment_evidence,
+                raw_payloads=dict(sync_result.transaction_evidence),
+                source_view=SOURCE_TRANSACTION_SEARCH,
             )
 
         # 6. Run reconciliation and independent verification (no auto-approvals, no write-back)
