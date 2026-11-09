@@ -408,3 +408,40 @@ export function getMatcherExplanation(
 export function isApprovalEligible(proposal: { approval_eligible?: boolean; verifier_status?: string }): boolean {
   return proposal.approval_eligible === true && proposal.verifier_status !== 'INVALID';
 }
+
+export interface FactSectionPresentation {
+  heading: string;
+  badge: string;
+  emptyText: string;
+  cardClass: string;
+  dividerClass: string;
+  headingClass: string;
+  badgeClass: string;
+  rowClass: string;
+}
+
+/** Model statements are only labelled verified once the independent verifier has accepted them. */
+export function getFactSectionPresentation(isInvalid: boolean): FactSectionPresentation {
+  if (isInvalid) {
+    return {
+      heading: 'Unverified Model Claims',
+      badge: 'Rejected by Verifier',
+      emptyText: 'No model claims recorded.',
+      cardClass: 'border-red-950/60 bg-[#0e1726]',
+      dividerClass: 'border-red-900/40',
+      headingClass: 'text-red-400',
+      badgeClass: 'text-red-400',
+      rowClass: 'bg-red-950/20 border-red-500/20',
+    };
+  }
+  return {
+    heading: 'Verified Facts',
+    badge: 'Grounded in DB Evidence',
+    emptyText: 'No verified factual statements recorded.',
+    cardClass: 'border-emerald-950/60 bg-[#0e1726]',
+    dividerClass: 'border-emerald-900/40',
+    headingClass: 'text-emerald-400',
+    badgeClass: 'text-emerald-500',
+    rowClass: 'bg-emerald-950/20 border-emerald-500/20',
+  };
+}

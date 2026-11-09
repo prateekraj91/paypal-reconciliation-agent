@@ -25,6 +25,7 @@ import {
   LoadingSpinner,
   Modal,
 } from '../components/Common';
+import { getFactSectionPresentation } from '../utils/formatters';
 
 export function InvestigationDetailPage({
   investigationId,
@@ -112,6 +113,8 @@ export function InvestigationDetailPage({
 
   const isInvalid = !isVerifierPassed;
   const isResolved = inv.status === 'APPROVED' || inv.status === 'REJECTED';
+  const factSection = getFactSectionPresentation(isInvalid);
+  const FactIcon = isInvalid ? XCircle : CheckCircle2;
 
   // Compute allocation distribution for display
   const allocDistribution: Array<{ invoiceId: string; amountMinor: number; currency: string }> = [];
@@ -241,26 +244,26 @@ export function InvestigationDetailPage({
         </p>
       </div>
 
-      {/* SECTION 1: VERIFIED FACTS (Ground Truth with DB Evidence IDs) */}
-      <div className="fintech-card space-y-3 border-emerald-950/60 bg-[#0e1726]">
-        <div className="flex items-center justify-between pb-2 border-b border-emerald-900/40">
-          <h3 className="text-xs font-bold uppercase text-emerald-400 tracking-wider flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-emerald-400" />
-            Verified Facts ({verifiedFacts.length})
+      {/* SECTION 1: MODEL FACTS (verified only when the independent verifier accepted them) */}
+      <div className={`fintech-card space-y-3 ${factSection.cardClass}`}>
+        <div className={`flex items-center justify-between pb-2 border-b ${factSection.dividerClass}`}>
+          <h3 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 ${factSection.headingClass}`}>
+            <FactIcon size={14} className={factSection.headingClass} />
+            {factSection.heading} ({verifiedFacts.length})
           </h3>
-          <span className="text-[10px] font-mono text-emerald-500 uppercase font-semibold">
-            Grounded in DB Evidence
+          <span className={`text-[10px] font-mono uppercase font-semibold ${factSection.badgeClass}`}>
+            {factSection.badge}
           </span>
         </div>
 
         {verifiedFacts.length === 0 ? (
-          <p className="text-xs text-slate-500 italic p-3">No verified factual statements recorded.</p>
+          <p className="text-xs text-slate-500 italic p-3">{factSection.emptyText}</p>
         ) : (
           <div className="space-y-2.5">
             {verifiedFacts.map((fact, idx) => (
               <div
                 key={idx}
-                className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/20 space-y-1.5"
+                className={`p-3 rounded-lg border space-y-1.5 ${factSection.rowClass}`}
               >
                 <div className="flex items-start justify-between gap-3 text-xs">
                   <p className="text-slate-100 font-medium leading-relaxed">{fact.statement}</p>
@@ -268,14 +271,14 @@ export function InvestigationDetailPage({
                     <MoneyDisplay
                       amountMinor={fact.amount_cents}
                       currency={fact.currency || 'USD'}
-                      className="text-emerald-400 font-semibold shrink-0"
+                      className={`font-semibold shrink-0 ${factSection.headingClass}`}
                     />
                   )}
                 </div>
                 {/* Cited Evidence IDs */}
                 <div className="flex items-center gap-1.5 pt-1 text-[11px] text-slate-400">
                   <Database size={11} className="text-emerald-400" />
-                  <span className="text-[10px] uppercase font-bold text-emerald-500/90">Cited Evidence:</span>
+                  <span className={`text-[10px] uppercase font-bold ${factSection.badgeClass}`}>Cited Evidence:</span>
                   <div className="flex flex-wrap gap-1">
                     {fact.evidence_ids.map((evId, evIdx) => (
                       <span
