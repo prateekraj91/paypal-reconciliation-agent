@@ -152,6 +152,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
               <tbody>
                 {proposals.map((p) => {
                   const isPending = p.decision_status === 'PENDING';
+                  const isEligible = p.approval_eligible !== false && p.verifier_status !== 'INVALID';
                   const expl = getMatcherExplanation(
                     p.outcome,
                     p.evidence,
@@ -193,11 +194,21 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                       </td>
                       <td className="max-w-[280px]">
                         <div className="space-y-1">
-                          <span className="badge badge-info text-[11px] font-mono">
-                            {expl.badgeLabel}
-                          </span>
+                          {p.verifier_status === 'INVALID' || expl.badgeLabel === 'PROMPT_INJECTION_SUSPECT' ? (
+                            <span className="badge badge-danger text-[11px] font-mono">
+                              PROMPT_INJECTION_SUSPECT
+                            </span>
+                          ) : p.verifier_status === 'NEEDS_REVIEW' && !isEligible ? (
+                            <span className="badge badge-warning text-[11px] font-mono">
+                              REMITTER MISMATCH
+                            </span>
+                          ) : (
+                            <span className="badge badge-info text-[11px] font-mono">
+                              {expl.badgeLabel}
+                            </span>
+                          )}
                           <p className="text-[11px] text-slate-400 leading-tight line-clamp-2">
-                            {expl.summary}
+                            {p.approval_prohibited_reason || expl.summary}
                           </p>
                         </div>
                       </td>
@@ -218,15 +229,26 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                           </button>
                           {isPending && p.outcome === 'PROPOSED' ? (
                             <>
-                              <button
-                                onClick={() => setSelectedForApproval(p)}
-                                className="btn btn-success py-1 px-2.5 text-xs font-semibold"
-                              >
-                                Approve
-                              </button>
+                              {isEligible ? (
+                                <button
+                                  onClick={() => setSelectedForApproval(p)}
+                                  className="btn btn-success py-1 px-2.5 text-xs font-semibold"
+                                >
+                                  Approve
+                                </button>
+                              ) : (
+                                <button
+                                  disabled
+                                  className="btn btn-secondary py-1 px-2.5 text-xs font-semibold opacity-50 cursor-not-allowed text-slate-400"
+                                  title={p.approval_prohibited_reason || "Approval prohibited by safety verifier"}
+                                >
+                                  Approve
+                                </button>
+                              )}
                               <button
                                 onClick={() => setSelectedForRejection(p)}
                                 className="btn btn-danger py-1 px-2 text-xs"
+                                title="Reject proposed reconciliation"
                               >
                                 Reject
                               </button>

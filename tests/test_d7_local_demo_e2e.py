@@ -345,9 +345,9 @@ def test_08_api_dashboard_summary_and_currency_counts(demo_engine):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Verify counts: 8 actionable out of 11 unresolved (NO_MATCH and UNVERIFIED excluded)
+    # Verify counts: 6 actionable out of 11 unresolved (safety-blocked INJECTION-011 and INVESTIGATE-010 excluded)
     counts = data["counts"]
-    assert counts["actionable_proposals"] == 8
+    assert counts["actionable_proposals"] == 6
     assert counts["unresolved_proposals"] == 11
 
     # Verify independent currency counts

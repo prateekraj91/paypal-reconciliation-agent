@@ -272,19 +272,18 @@ def test_investigation_approval_and_safety_fail_closed(client):
     assert resp_invgs.status_code == 200
     invgs = resp_invgs.json()["investigations"]
 
-    eligible_inv = next(i for i in invgs if i["verifier_status"] in ("VERIFIED", "NEEDS_REVIEW") and i["status"] == "NEEDS_REVIEW")
+    # In demo_merchant, INVESTIGATE-010 has an unresolved customer mismatch (Global Treasury vs Cyberdyne)
+    mismatch_inv = next(i for i in invgs if i["target_id"] == "PAY-DEMO-INVESTIGATE-010")
     invalid_inv = next(i for i in invgs if i["verifier_status"] == "INVALID")
 
-    # 1. Approve eligible investigation
-    resp_app = client.post(
-        f"/admin/investigations/{eligible_inv['id']}/approve",
+    # 1. Attempt to approve INVESTIGATE-010 with customer mismatch -> MUST BE BLOCKED (HTTP 400)
+    resp_app_mismatch = client.post(
+        f"/admin/investigations/{mismatch_inv['id']}/approve",
         json={"reviewer": "controller@demo.com", "notes": "Approved based on matching project code", "tenant_id": "demo_merchant"},
         headers=AUTH_HEADERS,
     )
-    assert resp_app.status_code == 200
-    app_data = resp_app.json()
-    assert app_data["status"] == "APPROVED"
-    assert "allocation_ids" in app_data
+    assert resp_app_mismatch.status_code == 400
+    assert "customer mismatch" in resp_app_mismatch.json()["detail"].lower()
 
     # 2. Attempt to approve INVALID investigation -> MUST FAIL CLOSED (400 Bad Request)
     resp_invalid_app = client.post(
@@ -358,10 +357,10 @@ def test_per_currency_totals_and_outstanding_accounting(client):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Counts
+    # Counts (8 proposed - 2 safety blocked [injection + remitter mismatch] = 6 actionable)
     counts = data["counts"]
     assert counts["total_payments"] == 11
-    assert counts["actionable_proposals"] == 8
+    assert counts["actionable_proposals"] == 6
     assert counts["unresolved_proposals"] == 11
 
     # USD bucket
