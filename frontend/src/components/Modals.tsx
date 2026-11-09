@@ -43,17 +43,44 @@ export function ProposalApprovalModal({
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Verification Summary Banner */}
-        <div className="p-3.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 flex items-start gap-3">
-          <ShieldCheck size={18} className="text-emerald-400 mt-0.5 shrink-0" />
-          <div className="text-xs space-y-1">
-            <span className="font-semibold text-emerald-300 block">
-              Independent Verifier Status: {proposal.verifier_status}
-            </span>
-            <p className="text-emerald-400/90 leading-relaxed">
-              Ledger capacities, currencies, and mathematical invariants verified. Proceeding will execute the 10-step atomic financial transaction.
-            </p>
+        {proposal.approval_eligible === false || proposal.verifier_status === 'INVALID' ? (
+          <div className={`p-3.5 rounded-lg flex items-start gap-3 ${
+            proposal.verifier_status === 'INVALID'
+              ? 'bg-red-950/40 border border-red-500/40'
+              : 'bg-amber-950/30 border border-amber-500/30'
+          }`}>
+            {proposal.verifier_status === 'INVALID' ? (
+              <ShieldAlert size={18} className="text-red-400 mt-0.5 shrink-0" />
+            ) : (
+              <AlertTriangle size={18} className="text-amber-400 mt-0.5 shrink-0" />
+            )}
+            <div className="text-xs space-y-1">
+              <span className={`font-semibold block ${
+                proposal.verifier_status === 'INVALID' ? 'text-red-300' : 'text-amber-300'
+              }`}>
+                {proposal.verifier_status === 'INVALID'
+                  ? 'Independent Verifier Status: INVALID (FAIL-CLOSED)'
+                  : 'Independent Verifier Status: NEEDS REVIEW (BLOCKED)'}
+              </span>
+              <p className={proposal.verifier_status === 'INVALID' ? 'text-red-400/90 leading-relaxed' : 'text-amber-400/90 leading-relaxed'}>
+                {proposal.approval_prohibited_reason ||
+                  'Approval is blocked due to safety invariant violations or unverified remitter relationships.'}
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="p-3.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 flex items-start gap-3">
+            <ShieldCheck size={18} className="text-emerald-400 mt-0.5 shrink-0" />
+            <div className="text-xs space-y-1">
+              <span className="font-semibold text-emerald-300 block">
+                Independent Verifier Status: {proposal.verifier_status}
+              </span>
+              <p className="text-emerald-400/90 leading-relaxed">
+                Ledger capacities, currencies, and mathematical invariants verified. Proceeding will execute the 10-step atomic financial transaction.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Financial Allocation Summary */}
         <div className="bg-slate-900/60 p-4 rounded-lg border border-slate-800 space-y-2.5">
@@ -150,8 +177,12 @@ export function ProposalApprovalModal({
           </button>
           <button
             type="submit"
-            disabled={isLoading || !reviewer.trim()}
-            className="btn btn-success text-xs font-semibold px-4"
+            disabled={isLoading || !reviewer.trim() || proposal.approval_eligible === false}
+            className={`btn text-xs font-semibold px-4 ${
+              proposal.approval_eligible === false
+                ? 'btn-secondary opacity-50 cursor-not-allowed'
+                : 'btn-success'
+            }`}
           >
             {isLoading ? 'Executing Atomic Ledger Transaction...' : 'Confirm & Authorize Allocation'}
           </button>
@@ -438,6 +469,34 @@ export function EvidenceInspectModal({
       maxWidth="max-w-2xl"
     >
       <div className="space-y-4">
+        {/* Authoritative Safety Verifier Banner if Blocked */}
+        {(proposal.approval_eligible === false || proposal.verifier_status === 'INVALID') && (
+          <div className={`p-3.5 rounded-lg flex items-start gap-3 ${
+            proposal.verifier_status === 'INVALID'
+              ? 'bg-red-950/40 border border-red-500/40'
+              : 'bg-amber-950/30 border border-amber-500/30'
+          }`}>
+            {proposal.verifier_status === 'INVALID' ? (
+              <ShieldAlert size={18} className="text-red-400 mt-0.5 shrink-0" />
+            ) : (
+              <AlertTriangle size={18} className="text-amber-400 mt-0.5 shrink-0" />
+            )}
+            <div className="text-xs space-y-1">
+              <span className={`font-semibold block ${
+                proposal.verifier_status === 'INVALID' ? 'text-red-300' : 'text-amber-300'
+              }`}>
+                {proposal.verifier_status === 'INVALID'
+                  ? 'APPROVAL STRICTLY PROHIBITED (FAIL-CLOSED)'
+                  : 'APPROVAL BLOCKED (UNRESOLVED CONFLICT)'}
+              </span>
+              <p className={proposal.verifier_status === 'INVALID' ? 'text-red-400/90 leading-relaxed' : 'text-amber-400/90 leading-relaxed'}>
+                {proposal.approval_prohibited_reason ||
+                  'Approval is blocked due to safety invariant violations or unverified remitter relationships.'}
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Outcome Classification Banner */}
         <div className="p-3.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5">
           <div className="flex items-center justify-between">
@@ -488,12 +547,39 @@ export function EvidenceInspectModal({
             <p className="text-xs text-slate-500 italic">No detailed signals attached to this proposal record.</p>
           ) : (
             <div className="space-y-1.5">
-              {expl.details.map((detail, idx) => (
-                <div key={idx} className="p-2 rounded bg-slate-950 border border-slate-800/80 text-xs text-slate-300 flex items-start gap-2">
-                  <span className="text-emerald-400 mt-0.5 shrink-0">✓</span>
-                  <span>{detail}</span>
-                </div>
-              ))}
+              {expl.details.map((detail, idx) => {
+                const textStr = String(detail);
+                const isCritical =
+                  textStr.includes('[CRITICAL]') ||
+                  textStr.includes('FAIL-CLOSED') ||
+                  textStr.toLowerCase().includes('prompt injection') ||
+                  textStr.toLowerCase().includes('adversarial');
+                const isWarning =
+                  textStr.includes('[UNRESOLVED') ||
+                  textStr.toLowerCase().includes('mismatch') ||
+                  textStr.toLowerCase().includes('missing');
+                return (
+                  <div
+                    key={idx}
+                    className={`p-2 rounded text-xs flex items-start gap-2 ${
+                      isCritical
+                        ? 'bg-red-950/40 border border-red-500/40 text-red-200'
+                        : isWarning
+                        ? 'bg-amber-950/30 border border-amber-500/30 text-amber-200'
+                        : 'bg-slate-950 border border-slate-800/80 text-slate-300'
+                    }`}
+                  >
+                    {isCritical ? (
+                      <span className="text-red-400 font-bold shrink-0">✕</span>
+                    ) : isWarning ? (
+                      <span className="text-amber-400 font-bold shrink-0">⚠</span>
+                    ) : (
+                      <span className="text-emerald-400 shrink-0">✓</span>
+                    )}
+                    <span>{detail}</span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

@@ -172,7 +172,7 @@ export function validateHeaderValue(name: string, value: string): void {
 
 export interface MatcherExplanation {
   badgeLabel: string;
-  category: 'exact' | 'ambiguous' | 'overpayment' | 'amount_mismatch' | 'partial' | 'currency_mismatch' | 'insufficient_corroboration' | 'no_candidates' | 'split';
+  category: 'exact' | 'ambiguous' | 'overpayment' | 'amount_mismatch' | 'partial' | 'currency_mismatch' | 'insufficient_corroboration' | 'no_candidates' | 'split' | 'prompt_injection' | 'customer_mismatch';
   summary: string;
   details: string[];
 }
@@ -220,6 +220,44 @@ export function getMatcherExplanation(
   const ev = evidence || [];
   const details = ev.map(formatSignal);
   const evText = ev.join(' ').toLowerCase();
+
+  // 0a. Prompt Injection / Adversarial Remittance Tokens (FAIL-CLOSED)
+  if (
+    evText.includes('prompt injection') ||
+    evText.includes('prompt_injection') ||
+    norm.includes('INJECTION')
+  ) {
+    const detailed = details.find(
+      (d) =>
+        typeof d === 'string' &&
+        (d.toLowerCase().includes('prompt injection') || d.toLowerCase().includes('adversarial'))
+    );
+    return {
+      badgeLabel: 'PROMPT_INJECTION_SUSPECT',
+      category: 'prompt_injection',
+      summary: detailed || 'Prompt injection detected in payment remittance. Safety verifier failed closed.',
+      details: details.length > 0 ? details : ['Adversarial prompt injection tokens detected in remittance. Approval is strictly prohibited.'],
+    };
+  }
+
+  // 0b. Customer Mismatch / Unverified Third-Party Remitter
+  if (
+    evText.includes('customer mismatch') ||
+    evText.includes('remitter mismatch') ||
+    evText.includes('third-party clearinghouse')
+  ) {
+    const detailed = details.find(
+      (d) =>
+        typeof d === 'string' &&
+        (d.toLowerCase().includes('customer mismatch') || d.toLowerCase().includes('remitter'))
+    );
+    return {
+      badgeLabel: 'Customer Mismatch (Third-Party Remitter)',
+      category: 'customer_mismatch',
+      summary: detailed || 'Remitter does not match invoice customer; clearinghouse relationship unverified.',
+      details: details.length > 0 ? details : ['Payment remitter differs from invoice customer. Relationship remains unverified.'],
+    };
+  }
 
   // 1. Multiple competing candidates / Ambiguity
   if (

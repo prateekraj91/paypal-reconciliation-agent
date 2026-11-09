@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from typing import Any, Optional, Sequence
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, or_, and_
 from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError
@@ -64,6 +64,42 @@ class InvestigationRepository(BaseRepository[InvestigationRecord]):
         if target_type:
             stmt = stmt.where(InvestigationRecord.target_type == target_type)
         stmt = stmt.order_by(desc(InvestigationRecord.created_at)).limit(limit).offset(offset)
+        return self.session.scalars(stmt).all()
+
+    def find_linked_investigations(
+        self,
+        tenant_id: str,
+        payment_id: Optional[str] = None,
+        provider_payment_id: Optional[str] = None,
+        proposal_id: Optional[str] = None,
+    ) -> Sequence[InvestigationRecord]:
+        """Find linked investigations matching proposal or payment target IDs under strict tenant isolation."""
+        conditions = []
+        if proposal_id:
+            conditions.append(
+                and_(
+                    InvestigationRecord.target_type == "proposal",
+                    InvestigationRecord.target_id == proposal_id,
+                )
+            )
+        target_payment_ids = [pid for pid in (payment_id, provider_payment_id) if pid]
+        if target_payment_ids:
+            conditions.append(
+                and_(
+                    InvestigationRecord.target_type == "payment",
+                    InvestigationRecord.target_id.in_(target_payment_ids),
+                )
+            )
+        if not conditions:
+            return []
+        stmt = (
+            select(InvestigationRecord)
+            .where(
+                InvestigationRecord.tenant_id == tenant_id,
+                or_(*conditions),
+            )
+            .order_by(desc(InvestigationRecord.created_at))
+        )
         return self.session.scalars(stmt).all()
 
     def update_status(

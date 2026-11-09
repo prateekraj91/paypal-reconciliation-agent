@@ -203,6 +203,16 @@ export interface ProposalItem {
   payment_currency: string;
   outcome: string;
   verifier_status: string;
+  approval_eligible?: boolean;
+  approval_prohibited_reason?: string | null;
+  linked_investigation?: {
+    id: string;
+    status: string;
+    classification: string | null;
+    verifier_status: string;
+    summary: string | null;
+    risk_flags?: string[];
+  } | null;
   decision_status: DecisionStatus;
   evidence?: string[];
   ambiguity_certificate?: Record<string, any> | null;

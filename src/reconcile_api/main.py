@@ -55,7 +55,13 @@ from reconcile_store.schema import (
     InvestigationRecord,
 )
 from reconcile_store.audit import GENESIS_HASH, AuditIntegrityError
-from reconcile_store.approval import ApprovalService, VerificationFailedError
+from reconcile_store.approval import (
+    ApprovalService,
+    VerificationFailedError,
+    ApprovalError,
+    ProposalSafetyEvaluation,
+    evaluate_proposal_investigation_safety,
+)
 from reconcile_store.workflow import StorageWorkflow
 from reconcile_store.repositories.base import ConflictError, StaleVersionError, EntityNotFoundError
 from reconcile_api.demo_data import seed_demo_data
@@ -1050,10 +1056,16 @@ def get_dashboard_summary(
             rejected_proposals += 1
         else:
             pending_proposals += 1
-            # Actionable: PROPOSED outcome with VERIFIED safety checks and non-empty allocations
+            # Actionable: PROPOSED outcome with verified safety checks and non-empty allocations
+            safety_eval = evaluate_proposal_investigation_safety(
+                session=session,
+                tenant_id=effective_tenant,
+                proposal=prop,
+            )
             if (
                 prop.outcome == "PROPOSED"
                 and prop.verifier_status == "VERIFIED"
+                and safety_eval.approval_eligible
                 and len(prop.allocations) > 0
             ):
                 actionable_proposals += 1
@@ -1712,9 +1724,28 @@ def _enrich_proposal_payload(
     p: ProposalRecord,
     pay: Optional[PaymentRecord],
     inv_repo: InvoiceRepository,
-) -> tuple[list[str], Optional[dict[str, Any]]]:
+) -> tuple[list[str], Optional[dict[str, Any]], ProposalSafetyEvaluation]:
     evidence: list[str] = json.loads(p.evidence_json) if p.evidence_json else []
     ambiguity_cert = json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None
+
+    # Evaluate linked investigation safety gate
+    safety_eval = evaluate_proposal_investigation_safety(
+        session=session,
+        tenant_id=effective_tenant,
+        proposal=p,
+        payment=pay,
+        proposed_allocs=p.allocations,
+    )
+
+    # Surface authoritative investigation alerts in evidence
+    if safety_eval.effective_verifier_status == "INVALID":
+        crit_msg = f"[CRITICAL] {safety_eval.approval_prohibited_reason}"
+        if crit_msg not in evidence and not any("prompt injection" in str(e).lower() for e in evidence):
+            evidence.insert(0, crit_msg)
+    elif safety_eval.effective_verifier_status == "NEEDS_REVIEW" and not safety_eval.approval_eligible:
+        warn_msg = f"[UNRESOLVED CONFLICT] {safety_eval.approval_prohibited_reason}"
+        if warn_msg not in evidence and not any("unresolved customer mismatch" in str(e).lower() or "[unresolved conflict]" in str(e).lower() for e in evidence):
+            evidence.insert(0, warn_msg)
 
     # Currency mismatch detection & authoritative explanation
     if pay and pay.reference:
@@ -1773,7 +1804,7 @@ def _enrich_proposal_payload(
         if exact_msg not in evidence and not any("exact match:" in str(e).lower() for e in evidence):
             evidence.append(exact_msg)
 
-    return evidence, ambiguity_cert
+    return evidence, ambiguity_cert, safety_eval
 
 
 @app.get("/admin/runs/{run_id}", status_code=status.HTTP_200_OK)
@@ -1812,7 +1843,7 @@ def get_run(
                 "amount_minor": pa.amount_minor,
                 "currency": pa.currency,
             })
-        ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+        ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
         proposals_list.append({
             "id": p.id,
             "payment_id": p.payment_id,
@@ -1821,7 +1852,10 @@ def get_run(
             "payment_amount_minor": pay.amount_minor if pay else 0,
             "payment_currency": pay.currency if pay else "USD",
             "outcome": p.outcome,
-            "verifier_status": p.verifier_status,
+            "verifier_status": safety_eval.effective_verifier_status,
+            "approval_eligible": safety_eval.approval_eligible,
+            "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+            "linked_investigation": safety_eval.linked_investigation,
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
@@ -1883,7 +1917,7 @@ def list_proposals(
                 "amount_minor": pa.amount_minor,
                 "currency": pa.currency,
             })
-        ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+        ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
         items.append({
             "id": p.id,
             "run_id": p.run_id,
@@ -1893,7 +1927,10 @@ def list_proposals(
             "payment_amount_minor": pay.amount_minor if pay else 0,
             "payment_currency": pay.currency if pay else "USD",
             "outcome": p.outcome,
-            "verifier_status": p.verifier_status,
+            "verifier_status": safety_eval.effective_verifier_status,
+            "approval_eligible": safety_eval.approval_eligible,
+            "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+            "linked_investigation": safety_eval.linked_investigation,
             "decision_status": dec_status,
             "allocations": allocs,
             "excess_amount_minor": p.excess_amount_minor,
@@ -1970,7 +2007,7 @@ def get_proposal(
         for d in decs
     ]
 
-    ev, ambig = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+    ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
 
     return {
         "id": p.id,
@@ -1982,7 +2019,10 @@ def get_proposal(
         "payment_amount_minor": pay.amount_minor if pay else 0,
         "payment_currency": pay.currency if pay else "USD",
         "outcome": p.outcome,
-        "verifier_status": p.verifier_status,
+        "verifier_status": safety_eval.effective_verifier_status,
+        "approval_eligible": safety_eval.approval_eligible,
+        "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+        "linked_investigation": safety_eval.linked_investigation,
         "decision_status": dec_status,
         "allocations": allocs,
         "verifications": ver_list,
@@ -2020,6 +2060,11 @@ def approve_proposal(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Proposal approval rejected by independent safety verifier: {exc}",
+        ) from exc
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
         ) from exc
     except (IneligiblePaymentError, IneligibleInvoiceError, ValueError) as exc:
         raise HTTPException(

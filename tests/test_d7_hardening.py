@@ -219,12 +219,22 @@ def test_investigation_approval_incomplete_status(client, test_db):
         assert "ineligible status" in resp.json()["detail"].lower() or "incomplete" in resp.json()["detail"].lower()
 
 
-def test_repeated_investigation_approval(client):
+def test_repeated_investigation_approval(client, test_db):
     """Attempting repeated approval on already resolved investigation MUST be rejected."""
+    import json
     client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
 
     resp_invgs = client.get("/admin/investigations?tenant_id=demo_merchant", headers=AUTH_HEADERS)
     verified_inv = next(i for i in resp_invgs.json()["investigations"] if i["verifier_status"] in ("VERIFIED", "NEEDS_REVIEW") and i["status"] == "NEEDS_REVIEW")
+
+    # Authorize customer match for legitimate approval test in demo_merchant
+    with test_db.session() as s:
+        inv = s.get(InvestigationRecord, verified_inv["id"])
+        res = inv.result
+        for c in res.get("candidate_invoice_analysis", []):
+            c["customer_match"] = True
+        inv.result_json = json.dumps(res)
+        s.commit()
 
     # 1. First approval succeeds
     resp1 = client.post(
