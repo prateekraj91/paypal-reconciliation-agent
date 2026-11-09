@@ -43,7 +43,7 @@ export function ProposalApprovalModal({
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Verification Summary Banner */}
-        {proposal.approval_eligible === false || proposal.verifier_status === 'INVALID' ? (
+        {proposal.approval_eligible !== true || proposal.verifier_status === 'INVALID' ? (
           <div className={`p-3.5 rounded-lg flex items-start gap-3 ${
             proposal.verifier_status === 'INVALID'
               ? 'bg-red-950/40 border border-red-500/40'
@@ -177,9 +177,9 @@ export function ProposalApprovalModal({
           </button>
           <button
             type="submit"
-            disabled={isLoading || !reviewer.trim() || proposal.approval_eligible === false}
+            disabled={isLoading || !reviewer.trim() || proposal.approval_eligible !== true}
             className={`btn text-xs font-semibold px-4 ${
-              proposal.approval_eligible === false
+              proposal.approval_eligible !== true
                 ? 'btn-secondary opacity-50 cursor-not-allowed'
                 : 'btn-success'
             }`}
@@ -470,7 +470,7 @@ export function EvidenceInspectModal({
     >
       <div className="space-y-4">
         {/* Authoritative Safety Verifier Banner if Blocked */}
-        {(proposal.approval_eligible === false || proposal.verifier_status === 'INVALID') && (
+        {(proposal.approval_eligible !== true || proposal.verifier_status === 'INVALID') && (
           <div className={`p-3.5 rounded-lg flex items-start gap-3 ${
             proposal.verifier_status === 'INVALID'
               ? 'bg-red-950/40 border border-red-500/40'

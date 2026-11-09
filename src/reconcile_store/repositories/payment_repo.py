@@ -9,7 +9,8 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError, ConflictError
-from ..schema import PaymentRecord, AllocationRecord, RefundRecord
+from ..ledger import PaymentLedger, compute_payment_ledger
+from ..schema import PaymentRecord, AllocationRecord
 
 
 class IneligiblePaymentError(Exception):
@@ -144,22 +145,16 @@ class PaymentRepository(BaseRepository[PaymentRecord]):
         )
         return int(self.session.scalar(stmt) or 0)
 
-    def get_unapplied_cash_minor(self, tenant_id: str, payment_id: str) -> int:
-        """Remaining unallocated amount: payment.amount_minor - sum(approved allocations) - sum(refunds/reversals).
-
-        Invariant I2: Remainder must remain explicitly identifiable as unapplied cash.
-        """
+    def get_ledger(self, tenant_id: str, payment_id: str) -> PaymentLedger:
+        """Current authoritative ledger position of this payment."""
         payment = self.get_payment(tenant_id, payment_id)
         if payment is None:
             raise EntityNotFoundError(f"Payment '{payment_id}' not found for tenant '{tenant_id}'")
-        allocated = self.get_total_allocated_minor(tenant_id, payment_id)
-        refund_stmt = select(func.coalesce(func.sum(RefundRecord.amount_minor), 0)).where(
-            RefundRecord.tenant_id == tenant_id,
-            RefundRecord.parent_payment_id.in_([payment.id, payment.provider_payment_id]),
-            RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
-        )
-        refunded = int(self.session.scalar(refund_stmt) or 0)
-        return max(0, payment.amount_minor - allocated - refunded)
+        return compute_payment_ledger(self.session, tenant_id, payment)
+
+    def get_unapplied_cash_minor(self, tenant_id: str, payment_id: str) -> int:
+        """Cash still available to allocate after applied lines and returns (I2)."""
+        return self.get_ledger(tenant_id, payment_id).unapplied_minor
 
     def validate_eligibility_for_allocation(self, payment: PaymentRecord) -> None:
         """Invariant I7: Only COMPLETED payments are eligible for approval."""
@@ -175,5 +170,5 @@ class PaymentRepository(BaseRepository[PaymentRecord]):
         if unapplied <= 0:
             raise IneligiblePaymentError(
                 f"Payment '{payment.provider_payment_id}' has no remaining unapplied cash "
-                f"(allocated {payment.amount_minor} of {payment.amount_minor} minor units)"
+                f"(gross {payment.amount_minor} minor units)"
             )

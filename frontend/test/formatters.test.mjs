@@ -8,6 +8,7 @@ import {
   getInvoiceEmptyLabels,
   validateHeaderValue,
   getMatcherExplanation,
+  isApprovalEligible,
 } from '../src/utils/formatters.ts';
 
 test('formatReconciliationRate handles zero denominator without showing 100%', () => {
@@ -239,4 +240,11 @@ test('getMatcherExplanation correctly classifies EXACT-001, INJECTION-011, INVES
   assert.notStrictEqual(split005.badgeLabel, 'Amount Mismatch');
   assert.ok(split005.summary.includes('Split payment allocation'));
   assert.ok(split005.summary.includes('2 invoices'));
+});
+
+test('isApprovalEligible fails closed unless the backend explicitly allows approval', () => {
+  assert.strictEqual(isApprovalEligible({ approval_eligible: true, verifier_status: 'VERIFIED' }), true);
+  assert.strictEqual(isApprovalEligible({ approval_eligible: false, verifier_status: 'VERIFIED' }), false);
+  assert.strictEqual(isApprovalEligible({ verifier_status: 'VERIFIED' }), false);
+  assert.strictEqual(isApprovalEligible({ approval_eligible: true, verifier_status: 'INVALID' }), false);
 });

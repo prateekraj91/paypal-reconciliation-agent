@@ -357,10 +357,11 @@ def test_per_currency_totals_and_outstanding_accounting(client):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Counts (8 proposed - 2 safety blocked [injection + remitter mismatch] = 6 actionable)
+    # REVERSAL-008 has no net cash left, so matching no longer proposes it (NO_MATCH).
+    # 7 proposed - 2 safety blocked (injection, remitter mismatch) = 5 actionable
     counts = data["counts"]
     assert counts["total_payments"] == 11
-    assert counts["actionable_proposals"] == 6
+    assert counts["actionable_proposals"] == 5
     assert counts["unresolved_proposals"] == 11
 
     # USD bucket
@@ -507,13 +508,28 @@ def test_actionable_proposals_dynamic_calculation(test_db, client, target_count)
 
         # Create target_count actionable proposals (PROPOSED + VERIFIED + allocations > 0 + pending decision)
         for i in range(target_count):
+            number = f"INV-ACT-{target_count}-{i}"
+            s.add_all([
+                PaymentRecord(
+                    id=f"pay_act_{target_count}_{i}", tenant_id=tenant, provider="paypal",
+                    provider_payment_id=f"PAY-ACT-{target_count}-{i}", amount_minor=10000, currency="USD",
+                    status="COMPLETED", received_at=now, payer_name="Anchor Customer", reference=number,
+                ),
+                InvoiceRecord(
+                    id=f"inv_act_{target_count}_{i}", tenant_id=tenant, provider="paypal",
+                    provider_invoice_id=number, invoice_number=number, customer_name="Anchor Customer",
+                    total_minor=10000, currency="USD", status="SENT", issued_on=today, due_on=today,
+                ),
+            ])
+            s.flush()
             prop = ProposalRecord(
                 id=f"prop_actionable_{target_count}_{i}",
                 tenant_id=tenant,
                 run_id=run_rec.id,
-                payment_id=anchor_pay.id,
+                payment_id=f"pay_act_{target_count}_{i}",
                 outcome="PROPOSED",
                 verifier_status="VERIFIED",
+                evidence_json='["REFERENCE_MATCH"]',
                 created_at=now,
             )
             s.add(prop)
@@ -522,8 +538,8 @@ def test_actionable_proposals_dynamic_calculation(test_db, client, target_count)
                 id=f"palloc_{target_count}_{i}",
                 tenant_id=tenant,
                 proposal_id=prop.id,
-                payment_id=anchor_pay.id,
-                invoice_id=anchor_inv.id,
+                payment_id=f"pay_act_{target_count}_{i}",
+                invoice_id=f"inv_act_{target_count}_{i}",
                 amount_minor=10000,
                 currency="USD",
             )
