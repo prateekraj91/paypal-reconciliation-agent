@@ -39,6 +39,16 @@ class InvestigationRawResponse:
     error: Optional[str] = None
 
 
+def citable_evidence_ids(context: InvestigationContext) -> List[str]:
+    """Return the evidence IDs retrieved for this case, unique and in retrieval order."""
+    ordered: Dict[str, None] = {}
+    for record in context.evidence_records:
+        evidence_id = record.get("evidence_id") if isinstance(record, dict) else None
+        if isinstance(evidence_id, str) and evidence_id:
+            ordered[evidence_id] = None
+    return list(ordered)
+
+
 class InvestigationModelProvider(ABC):
     """Abstract interface for local or synthetic LLM providers."""
 
