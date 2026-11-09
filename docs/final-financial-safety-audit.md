@@ -48,7 +48,7 @@ P1 incorrect financial result or unsafe approval, P2 operator/API defect, P3 pol
 
 F1–F23 are fixed. Corrections made while fixing:
 
-- **F1** was found by reading the code. The new concurrency test also passes on the original code, so the race was not reproduced there. The proposal lock is kept as a guarantee rather than a proven bug fix.
+- **F1** was reclassified after a forced reproduction. See "Concurrency findings" below: double approval was not exploitable, but a different race on the same proposal was.
 - **F2**: `NOT_VERIFIED` stays approvable, as the existing D4 tests require, because approval always reruns the independent verifier in its transaction. `REJECTED`, `ESCALATED`, `UNVERIFIED`, `INVALID` and `NEEDS_REVIEW` stored on the proposal are refused.
 - A check that refused any proposal older than the newest for its payment was tried and removed. It broke the documented multiple-pending-proposals flow, and capacity revalidation already refuses proposals that no longer fit.
 
@@ -107,3 +107,26 @@ Run in a `READ ONLY` transaction with the new code; the database was not reseede
 | **Actionable** | **3, not the 6 originally expected** |
 
 The 3 are EXACT-001, PARTIAL-004 and SPLIT-005. REFUND-007 and REVERSAL-008 are stale gross proposals. OVERPAY-006 was stored without its reference evidence (F24), so it would have failed at approval on the old code too. Rerunning reconciliation there gives 5, as on the seeded database, but that writes to the database and was not done.
+
+### Concurrency findings (F1 reclassified)
+
+The original F1 claim was that two approvals of one proposal could double-allocate. That is **not exploitable on the original code**. The earlier eight-thread test passed there because the original already locked the payment row, and after that lock the verifier reports "payment is already allocated in the ledger". `uq_allocation_tenant_pay_inv` is a second barrier.
+
+[`test_approval_race_postgres.py`](../tests/store/test_approval_race_postgres.py) forces each ordering with two sessions. Session A stops just before COMMIT holding its locks; session B starts, and A is released only once `pg_stat_activity` shows B waiting on a lock.
+
+| Forced race | Original code | Current code |
+|-------------|---------------|--------------|
+| Approve, then a second approve (different key) | One allocation, one decision, one event. Loser gets a verifier error | Same state. Loser gets a clear conflict |
+| Approve, then approve with the same key | One allocation. The retry gets an **error** instead of the first result | Retry returns the first result |
+| Approve, then reject | **Confirmed defect:** $400 allocated, APPROVED and REJECTED decisions both recorded, proposal left REJECTED | Reject refused; proposal stays APPROVED |
+| Reject, then approve | **Confirmed defect:** $400 allocated on a proposal already being rejected, both decisions recorded | Approve refused; no allocation |
+
+Dropping the unique constraint in a throwaway database did not change the double-approval result on either version, so the verifier check, not the constraint, stops it on the original. Removing only the proposal lock from a scratch copy of the current code brought back both reject races and the same-key error, so the lock is required for those.
+
+Classification: the approve-versus-reject races and the same-key retry are confirmed defects, fixed. Prevention of double allocation by the proposal lock is defensive hardening: the original was already safe there. All four tests passed in 20 consecutive repeat runs.
+
+### Fresh demonstration database
+
+`reconcile_demo_final` is a separate database on the same local PostgreSQL server, created from `template0`, migrated to `0005_d6_ai_investigations` and seeded by `POST /admin/demo/seed`. Connection settings are in the ignored `.env.demo.final`. A connection guard refused anything but this database during the build, apart from read-only checksums of `reconcile_demo`, which were identical before and after across all 18 tables.
+
+Five proposals are actionable: EXACT-001, OVERPAY-006, PARTIAL-004, REFUND-007 (at its $200 net) and SPLIT-005. REVERSAL-008 is NO_MATCH with no capacity. INJECTION-011 (INVALID) and INVESTIGATE-010 (NEEDS_REVIEW) are blocked. AI investigations use the mock provider, not a live model. No approvals were made in this database; approval outcomes were exercised on a throwaway copy built the same way, which produced identical proposals.
