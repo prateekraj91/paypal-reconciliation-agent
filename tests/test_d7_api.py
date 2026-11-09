@@ -31,9 +31,13 @@ from reconcile_store.schema import (
     DecisionRecord,
     RefundRecord,
     AllocationRecord,
+    ProviderSettlementRecord,
+    AuditEventRecord,
 )
 from reconcile_store.repositories.tenant_repo import TenantRepository
 from reconcile_store.repositories.payment_repo import PaymentRepository
+from reconcile_store.repositories.invoice_repo import InvoiceRepository
+from reconcile_store.approval import ApprovalService
 
 
 @pytest.fixture
@@ -895,6 +899,342 @@ def test_refund_reversal_edge_cases_with_allocations(test_db, client):
     assert t4["net_amount_minor"] == 0
     assert t4["unapplied_cash_minor"] == 0
     assert t4["reconciliation_status"] == "RECONCILED"
+
+    # Invoice assertions for Case 3 & Case 4
+    resp_inv = client.get(f"/admin/invoices?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp_inv.status_code == 200
+    invoices = {i["provider_invoice_id"]: i for i in resp_inv.json()["invoices"]}
+
+    # Case 3 invoice ($1000 total, $600 allocated from $1000 payment, $200 refund from unapplied cash):
+    # Invoice remains PARTIALLY_RECONCILED with $400 ($600 allocated)
+    inv3_api = invoices["INV-EDGE-3"]
+    assert inv3_api["total_minor"] == 100000
+    assert inv3_api["allocated_minor"] == 60000
+    assert inv3_api["outstanding_balance_minor"] == 40000
+    assert inv3_api["reconciliation_status"] == "PARTIAL"
+
+    # Case 4 invoice ($500 total, $500 allocated from $500 payment, $500 payment full reversal):
+    # Invoice balance is restored to $500, reconciliation status is OPEN (NOT left appearing paid)
+    inv4_api = invoices["INV-EDGE-4"]
+    assert inv4_api["total_minor"] == 50000
+    assert inv4_api["allocated_minor"] == 50000
+    assert inv4_api["refunded_minor"] == 50000
+    assert inv4_api["net_applied_minor"] == 0
+    assert inv4_api["outstanding_balance_minor"] == 50000
+    assert inv4_api["reconciliation_status"] == "OPEN"
+
+
+def test_complete_accounting_lifecycle_refunds_and_reversals(test_db, client):
+    """Verify complete accounting lifecycle:
+    1. Original payment ingestion.
+    2. Invoice allocation.
+    3. Settlement.
+    4. Partial refund.
+    5. Full reversal.
+    6. Resulting invoice outstanding balance.
+    7. Resulting net payment and unapplied cash.
+    8. Replacement payment approval after reversal.
+    9. Cryptographic audit trail preservation.
+    """
+    tenant = "test_tenant"
+    now = datetime.now(timezone.utc)
+
+    with test_db.session() as s:
+        # 1. Ingestion: Invoices and Payments
+        inv_rev = InvoiceRecord(
+            id="inv_life_rev",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id="INV-LIFE-REV",
+            invoice_number="INV-LIFE-REV",
+            customer_name="Cyberdyne Systems",
+            total_minor=50000,  # $500
+            currency="USD",
+            issued_on=now.date(),
+            due_on=now.date(),
+        )
+        inv_part = InvoiceRecord(
+            id="inv_life_part",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id="INV-LIFE-PART",
+            invoice_number="INV-LIFE-PART",
+            customer_name="Weyland Yutani",
+            total_minor=50000,  # $500
+            currency="USD",
+            issued_on=now.date(),
+            due_on=now.date(),
+        )
+        inv_sett = InvoiceRecord(
+            id="inv_life_sett",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_invoice_id="INV-LIFE-SETT",
+            invoice_number="INV-LIFE-SETT",
+            customer_name="Tyrell Corp",
+            total_minor=50000,  # $500
+            currency="USD",
+            issued_on=now.date(),
+            due_on=now.date(),
+        )
+
+        pay_rev = PaymentRecord(
+            id="pay_life_rev",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-LIFE-REV",
+            amount_minor=50000,  # $500
+            currency="USD",
+            received_at=now,
+            reference="INV-LIFE-REV",
+        )
+        pay_part = PaymentRecord(
+            id="pay_life_part",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-LIFE-PART",
+            amount_minor=50000,  # $500
+            currency="USD",
+            received_at=now,
+            reference="INV-LIFE-PART",
+        )
+        pay_sett = PaymentRecord(
+            id="pay_life_sett",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-LIFE-SETT",
+            amount_minor=50000,  # $500
+            currency="USD",
+            received_at=now,
+            reference="INV-LIFE-SETT",
+        )
+
+        s.add_all([inv_rev, inv_part, inv_sett, pay_rev, pay_part, pay_sett])
+        s.commit()
+
+        inv_repo = InvoiceRepository(s)
+        pay_repo = PaymentRepository(s)
+
+        # Baseline: All payments have 100% unapplied cash, all invoices have 100% outstanding balance
+        assert pay_repo.get_unapplied_cash_minor(tenant, pay_rev.id) == 50000
+        assert pay_repo.get_unapplied_cash_minor(tenant, pay_part.id) == 50000
+        assert pay_repo.get_unapplied_cash_minor(tenant, pay_sett.id) == 50000
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_rev.id) == 50000
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_part.id) == 50000
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_sett.id) == 50000
+
+        # 2. Allocation & Approval
+        run = ReconciliationRunRecord(
+            id="run_life_1",
+            tenant_id=tenant,
+            input_snapshot_id="snap_life_1",
+            matcher_name="test_deterministic",
+        )
+        s.add(run)
+        s.flush()
+
+        prop_rev = ProposalRecord(
+            id="prop_life_rev",
+            tenant_id=tenant,
+            run_id=run.id,
+            payment_id=pay_rev.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            evidence_json='["REFERENCE_MATCH"]',
+        )
+        pa_rev = ProposalAllocationRecord(
+            id="pa_life_rev",
+            tenant_id=tenant,
+            proposal_id=prop_rev.id,
+            payment_id=pay_rev.id,
+            invoice_id=inv_rev.id,
+            amount_minor=50000,
+            currency="USD",
+        )
+        prop_part = ProposalRecord(
+            id="prop_life_part",
+            tenant_id=tenant,
+            run_id=run.id,
+            payment_id=pay_part.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            evidence_json='["REFERENCE_MATCH"]',
+        )
+        pa_part = ProposalAllocationRecord(
+            id="pa_life_part",
+            tenant_id=tenant,
+            proposal_id=prop_part.id,
+            payment_id=pay_part.id,
+            invoice_id=inv_part.id,
+            amount_minor=50000,
+            currency="USD",
+        )
+        s.add_all([prop_rev, pa_rev, prop_part, pa_part])
+        s.commit()
+
+        appr_svc = ApprovalService(s)
+        res_rev = appr_svc.approve_proposal(tenant, prop_rev.id, actor="operator@example.com", idempotency_key="idemp_life_rev")
+        assert res_rev.status == "APPROVED"
+        res_part = appr_svc.approve_proposal(tenant, prop_part.id, actor="operator@example.com", idempotency_key="idemp_life_part")
+        assert res_part.status == "APPROVED"
+
+        # 3. Provider Settlement on inv_sett
+        sett = ProviderSettlementRecord(
+            id="sett_life_1",
+            tenant_id=tenant,
+            provider="paypal",
+            environment="sandbox",
+            provider_settlement_id="SETT-LIFE-001",
+            invoice_id=inv_sett.id,
+            payment_id=pay_sett.id,
+            amount_minor=50000,
+            currency="USD",
+        )
+        s.add(sett)
+        s.commit()
+
+        # All 3 invoices are fully paid/settled
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_rev.id) == 0
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_part.id) == 0
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_sett.id) == 0
+
+        # 4. Partial Refund: $200 refund on pay_part ($500 payment -> $200 refunded)
+        r_part = RefundRecord(
+            id="ref_life_part",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REF-LIFE-PART",
+            parent_payment_id=pay_part.id,
+            invoice_id=inv_part.id,
+            amount_minor=20000,  # $200
+            currency="USD",
+            status="COMPLETED",
+            record_type="REFUND",
+            refunded_at=now,
+        )
+
+        # 5. Full Reversal: $500 reversal on pay_rev
+        r_rev = RefundRecord(
+            id="ref_life_rev",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_refund_id="REV-LIFE-FULL",
+            parent_payment_id=pay_rev.id,
+            invoice_id=inv_rev.id,
+            amount_minor=50000,  # $500
+            currency="USD",
+            status="COMPLETED",
+            record_type="REVERSAL",
+            refunded_at=now,
+        )
+        s.add_all([r_part, r_rev])
+        s.commit()
+
+        # 6. Verification of Resulting Balances
+        # a) Fully reversed invoice: Outstanding balance fully restored to $500
+        assert inv_repo.get_total_returns_minor(tenant, inv_rev.id) == 50000
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_rev.id) == 50000
+        # Invoice is eligible for replacement allocation
+        inv_repo.validate_eligibility_for_allocation(inv_rev)
+
+        # b) Partially refunded invoice: Outstanding balance restored to $200
+        assert inv_repo.get_total_returns_minor(tenant, inv_part.id) == 20000
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_part.id) == 20000
+        inv_repo.validate_eligibility_for_allocation(inv_part)
+
+        # c) Payment net amounts & unapplied cash
+        assert pay_repo.get_unapplied_cash_minor(tenant, pay_rev.id) == 0
+        assert pay_repo.get_unapplied_cash_minor(tenant, pay_part.id) == 0
+
+        # 8. Replacement payment approval after reversal
+        pay_replacement = PaymentRecord(
+            id="pay_life_replacement",
+            tenant_id=tenant,
+            provider="paypal",
+            provider_payment_id="PAY-LIFE-REPLACEMENT",
+            amount_minor=50000,  # $500
+            currency="USD",
+            received_at=now,
+            reference="INV-LIFE-REV",
+        )
+        s.add(pay_replacement)
+        s.flush()
+
+        prop_replacement = ProposalRecord(
+            id="prop_life_replacement",
+            tenant_id=tenant,
+            run_id=run.id,
+            payment_id=pay_replacement.id,
+            outcome="PROPOSED",
+            verifier_status="VERIFIED",
+            evidence_json='["REFERENCE_MATCH"]',
+        )
+        pa_replacement = ProposalAllocationRecord(
+            id="pa_life_replacement",
+            tenant_id=tenant,
+            proposal_id=prop_replacement.id,
+            payment_id=pay_replacement.id,
+            invoice_id=inv_rev.id,
+            amount_minor=50000,
+            currency="USD",
+        )
+        s.add_all([prop_replacement, pa_replacement])
+        s.commit()
+
+        res_rep = appr_svc.approve_proposal(
+            tenant,
+            prop_replacement.id,
+            actor="operator@example.com",
+            idempotency_key="idemp_life_replacement",
+        )
+        assert res_rep.status == "APPROVED"
+
+        # Now inv_rev is once again fully paid by the replacement payment
+        assert inv_repo.get_ledger_outstanding_minor(tenant, inv_rev.id) == 0
+
+    # API Endpoint Ground Truth Verification
+    resp_inv = client.get(f"/admin/invoices?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp_inv.status_code == 200
+    invs = {i["provider_invoice_id"]: i for i in resp_inv.json()["invoices"]}
+
+    # Partially refunded invoice via API: status is PARTIAL, outstanding $200
+    part_api = invs["INV-LIFE-PART"]
+    assert part_api["total_minor"] == 50000
+    assert part_api["allocated_minor"] == 50000
+    assert part_api["refunded_minor"] == 20000
+    assert part_api["net_applied_minor"] == 30000
+    assert part_api["outstanding_balance_minor"] == 20000
+    assert part_api["reconciliation_status"] == "PARTIAL"
+
+    # Detail endpoint for partially refunded invoice
+    resp_detail = client.get(f"/admin/invoices/{part_api['id']}?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp_detail.status_code == 200
+    detail = resp_detail.json()
+    assert detail["refunded_minor"] == 20000
+    assert len(detail["refunds"]) == 1
+    assert detail["refunds"][0]["provider_refund_id"] == "REF-LIFE-PART"
+    assert detail["reconciliation_status"] == "PARTIAL"
+
+    # Transaction API verification: net amounts and statuses
+    resp_tx = client.get(f"/admin/transactions?tenant_id={tenant}", headers=AUTH_HEADERS)
+    assert resp_tx.status_code == 200
+    txs = {t["provider_payment_id"]: t for t in resp_tx.json()["transactions"]}
+
+    # Reversed payment: net amount 0, reversal 500, unapplied 0, status RECONCILED
+    tx_rev = txs["PAY-LIFE-REV"]
+    assert tx_rev["amount_minor"] == 50000
+    assert tx_rev["reversal_amount_minor"] == 50000
+    assert tx_rev["net_amount_minor"] == 0
+    assert tx_rev["unapplied_cash_minor"] == 0
+    assert tx_rev["reconciliation_status"] == "RECONCILED"
+
+    # Partially refunded payment: net amount 300, refund 200, unapplied 0, status RECONCILED
+    tx_part = txs["PAY-LIFE-PART"]
+    assert tx_part["amount_minor"] == 50000
+    assert tx_part["refund_amount_minor"] == 20000
+    assert tx_part["net_amount_minor"] == 30000
+    assert tx_part["unapplied_cash_minor"] == 0
+    assert tx_part["reconciliation_status"] == "RECONCILED"
 
 
 
