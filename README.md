@@ -42,20 +42,104 @@ balances. All amounts are integer minor units.
 - A return or applied line in another currency leaves the payment with zero
   available cash until someone resolves it.
 
-## Service and dashboard
+## Setup
+
+Requires Python 3.10 or later, Node.js, and PostgreSQL 16 (SQLite works for local development).
 
     python -m venv .venv && .venv/bin/pip install -e ".[dev]"
     cp .env.example .env   # then fill in your own values
+    set -a && source .env && set +a
     .venv/bin/alembic upgrade head
     PYTHONPATH=src .venv/bin/uvicorn reconcile_api.main:app --port 8000
     npm --prefix frontend install && npm --prefix frontend run dev
+
+Open http://127.0.0.1:5173 and sign in with your `ADMIN_API_KEY`.
 
 `.env.example` lists every setting. The main ones are `RECONCILE_DB_URL`,
 `ADMIN_API_KEY`, the `PAYPAL_*` credentials, `CORS_ALLOWED_ORIGINS` (empty by
 default, so no cross-origin browser access) and `MODEL_PROVIDER`.
 
-The dashboard's seed action, or `POST /admin/demo/seed`, loads a synthetic demo
-tenant (`demo_merchant`). Use a local database for it.
+## PayPal Sandbox setup
+
+1. In the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/),
+   create a Sandbox REST app. Enable Invoicing and Transaction Search for it.
+2. Put its credentials in `.env` as `PAYPAL_CLIENT_ID` and
+   `PAYPAL_CLIENT_SECRET`. Keep `PAYPAL_BASE_URL` on
+   `https://api-m.sandbox.paypal.com`.
+3. Create test invoices, either in the Sandbox or with the seeding tool, which is
+   the only code that writes to PayPal:
+
+        PYTHONPATH=src:. python -m tools.seed_sandbox           # dry run, plans only
+        PYTHONPATH=src:. python -m tools.seed_sandbox --apply   # idempotent
+
+4. Pay an invoice as a Sandbox personal account, then run a read-only sync:
+
+        curl -X POST http://127.0.0.1:8000/admin/tenants \
+          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+          -d '{"tenant_id":"test_tenant","name":"PayPal Sandbox"}'
+        curl -X POST http://127.0.0.1:8000/admin/connections \
+          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+          -d '{"tenant_id":"test_tenant","provider":"paypal","environment":"sandbox","status":"ACTIVE"}'
+        curl -X POST http://127.0.0.1:8000/admin/sync \
+          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+          -d '{"tenant_id":"test_tenant","environment":"sandbox","start_date":"<ISO-8601 start>","end_date":"<ISO-8601 end>","idempotency_key":"sync-1"}'
+        PYTHONPATH=src .venv/bin/python -m reconcile_worker --once --tenant-id test_tenant
+
+   Use a new `idempotency_key` for each sync.
+
+A new payment reaches the Invoicing API first and Transaction Search later (about
+two hours in our testing). Until then it has a placeholder payer. A later sync
+merges both views into the same payment.
+
+## Ollama configuration
+
+The AI investigator defaults to a deterministic mock. To use a local model:
+
+    ollama pull qwen3:8b
+    ollama serve
+
+Then set these in `.env` and restart the API:
+
+    MODEL_PROVIDER=ollama
+    OLLAMA_BASE_URL=http://127.0.0.1:11434
+    OLLAMA_MODEL=qwen3:8b
+
+Use a current Ollama release. A run takes a few minutes on a laptop. Each stored
+investigation records its provider, so mock output is never mistaken for model
+output. The investigator is advisory: its output goes through the independent
+verifier and can never change a financial record.
+
+## Demo scenarios
+
+The dashboard's seed action, or `POST /admin/demo/seed`, loads a synthetic tenant,
+`demo_merchant`. Use a local database for it. None of these records came from PayPal.
+
+| Payment | Scenario |
+|---|---|
+| `PAY-DEMO-EXACT-001` | Exact match, ready for approval |
+| `PAY-DEMO-UNMATCHED-002` | No matching invoice |
+| `PAY-DEMO-COMPETING-003` | Competing invoices, stays ambiguous |
+| `PAY-DEMO-PARTIAL-004` | Partial payment |
+| `PAY-DEMO-SPLIT-005` | One payment split across invoices |
+| `PAY-DEMO-OVERPAY-006` | Overpayment |
+| `PAY-DEMO-REFUND-007` | Refund |
+| `PAY-DEMO-REVERSAL-008` | Full reversal |
+| `PAY-DEMO-CURR-MISMATCH-009` | USD payment against a EUR invoice |
+| `PAY-DEMO-INVESTIGATE-010` | Case for AI investigation |
+| `PAY-DEMO-INJECTION-011` | Prompt injection in payment metadata |
+
+## Reset
+
+Everything here applies to a local database only. Never run it against a shared
+or production one.
+
+    dropdb <local_db> && createdb <local_db>
+    set -a && source .env && set +a
+    .venv/bin/alembic upgrade head
+
+Restart the API, then load the demo data again from the dashboard or with
+`POST /admin/demo/seed`. To keep a known state between takes, `pg_dump` the
+database once and restore that dump instead. Do approvals in a disposable copy.
 
 ## Tests
 
@@ -68,7 +152,7 @@ connections to anything except a local disposable database. Set
 `TEST_POSTGRESQL_URL` to a local database to include the PostgreSQL concurrency
 tests; without it they are skipped.
 
-## Security and limitations
+## Known limitations and security
 
 - One shared `ADMIN_API_KEY` protects the admin API, and any holder can act for
   any tenant. Per-user, per-tenant authorization is required before more than
@@ -79,6 +163,16 @@ tests; without it they are skipped.
 - Proposals stored before a ledger change stay as they are. They are re-evaluated
   live and blocked if they no longer fit; run reconciliation again to regenerate.
 - This has been exercised with synthetic and Sandbox data only.
+- Sync is manual: webhook ingestion needs a public URL and a webhook registered
+  in PayPal.
+- Payments that PayPal already settled against an invoice appear as
+  `PROVIDER_SETTLED`, not as proposals to approve.
+- A repeat sync adds no payments or settlements, but it does add a new
+  reconciliation run and new proposal rows.
+- The Sandbox opening balance (event `T1900`) can appear as a payment in
+  databases synced before non-payment events were excluded.
+- The local model's output is often rejected by the verifier. A rejection fails
+  closed. Results on demo cases don't measure accuracy.
 
 ## Core matcher
 
