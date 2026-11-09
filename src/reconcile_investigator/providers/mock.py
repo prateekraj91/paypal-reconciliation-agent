@@ -275,9 +275,13 @@ class MockInvestigationProvider(InvestigationModelProvider):
 
         # Suggested resolution
         suggested_resolution = None
-        if candidates and classification not in ("PROMPT_INJECTION_SUSPECT", "AMBIGUOUS_MATCH"):
+        net_cash = pay_amt - sum(
+            (item.get("evidence", item).get("amount_cents") or 0) for item in (*refunds, *reversals)
+        )
+        can_suggest = net_cash > 0 or self.behavior == MockProviderBehavior.CAPACITY_VIOLATION
+        if candidates and can_suggest and classification not in ("PROMPT_INJECTION_SUSPECT", "AMBIGUOUS_MATCH"):
             best_cand = candidates[0]
-            alloc_amt = min(pay_amt, best_cand.get("calculated_outstanding_cents", pay_amt))
+            alloc_amt = min(net_cash, best_cand.get("calculated_outstanding_cents", net_cash))
             if self.behavior == MockProviderBehavior.CAPACITY_VIOLATION:
                 alloc_amt = best_cand.get("calculated_outstanding_cents", 1000) + 500000
 

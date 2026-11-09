@@ -17,6 +17,9 @@ from typing import Any, Dict, List, Optional, Set
 from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import Session
 
+from reconcile_store.repositories.invoice_repo import InvoiceRepository
+from reconcile_store.repositories.payment_repo import PaymentRepository
+
 from reconcile_store.schema import (
     InvoiceRecord,
     PaymentRecord,
@@ -553,79 +556,22 @@ class IndependentSafetyVerifier:
         Includes approved allocations, provider settlements, refunds, and reversals.
         Raises LedgerReconstructionError on failure; never falls back to total_minor.
         """
-        domain_inv = invoice_rec.to_domain()
-
-        stmt_alloc = select(AllocationRecord).where(
-            AllocationRecord.tenant_id == self.tenant_id,
-            AllocationRecord.invoice_id == invoice_rec.id,
-        )
-        alloc_recs = self.session.scalars(stmt_alloc).all()
-        domain_allocs: List[PaymentAllocation] = []
-        for a in alloc_recs:
-            pay = self.session.get(PaymentRecord, a.payment_id)
-            pay_id = pay.provider_payment_id if pay else f"PAY-{a.payment_id}"
-            domain_allocs.append(a.to_domain(pay_id, invoice_rec.provider_invoice_id))
-
-        stmt_sett = select(ProviderSettlementRecord).where(
-            ProviderSettlementRecord.tenant_id == self.tenant_id,
-            ProviderSettlementRecord.invoice_id == invoice_rec.id,
-        )
-        sett_recs = self.session.scalars(stmt_sett).all()
-        domain_settlements: List[PaymentAllocation] = [
-            s.to_domain(s.provider_settlement_id, invoice_rec.provider_invoice_id)
-            for s in sett_recs
-        ]
-
-        # Collect payment IDs linked to this invoice via allocations or settlements
-        linked_payment_db_ids = [a.payment_id for a in alloc_recs]
-        for s in sett_recs:
-            if s.payment_id:
-                linked_payment_db_ids.append(s.payment_id)
-
-        conditions = [RefundRecord.invoice_id == invoice_rec.id]
-        if linked_payment_db_ids:
-            conditions.append(
-                and_(
-                    RefundRecord.parent_payment_id.in_(linked_payment_db_ids),
-                    or_(RefundRecord.invoice_id.is_(None), RefundRecord.invoice_id == invoice_rec.id),
-                )
-            )
-
-        stmt_ref = select(RefundRecord).where(
-            RefundRecord.tenant_id == self.tenant_id,
-            or_(*conditions),
-        )
-        ref_recs = self.session.scalars(stmt_ref).all()
-        domain_refunds: List[Refund] = []
-        domain_reversals: List[PaymentReversal] = []
-        for r in ref_recs:
-            parent_pay = self.session.get(PaymentRecord, r.parent_payment_id) if r.parent_payment_id else None
-            pay_id = parent_pay.provider_payment_id if parent_pay else "unknown"
-            if getattr(r, "record_type", "REFUND") == "REVERSAL":
-                domain_reversals.append(r.to_reversal_domain(pay_id, invoice_rec.provider_invoice_id))
-            else:
-                domain_refunds.append(r.to_domain(pay_id, invoice_rec.provider_invoice_id))
-
         try:
-            return outstanding_cents(
-                domain_inv,
-                domain_allocs + domain_settlements,
-                refunds=domain_refunds,
-                reversals=domain_reversals,
-            )
+            for model in (AllocationRecord, ProviderSettlementRecord):
+                for record in self.session.scalars(
+                    select(model).where(model.tenant_id == self.tenant_id, model.invoice_id == invoice_rec.id)
+                ):
+                    if record.currency != invoice_rec.currency:
+                        raise ValueError(f"applied record '{record.id}' is in {record.currency}")
+            return InvoiceRepository(self.session).get_ledger_outstanding_minor(self.tenant_id, invoice_rec.id)
         except Exception as exc:
             raise LedgerReconstructionError(
                 f"Authoritative ledger balance calculation failed for invoice {invoice_rec.invoice_number}: {exc}"
             ) from exc
 
     def calculate_payment_remaining_capacity(self, payment_rec: PaymentRecord) -> int:
-        """Calculate remaining unallocated capacity on a payment in minor units."""
-        stmt = select(AllocationRecord).where(
-            AllocationRecord.tenant_id == self.tenant_id,
-            AllocationRecord.payment_id == payment_rec.id,
-        )
-        allocated = sum(a.amount_minor for a in self.session.scalars(stmt).all())
-        return payment_rec.amount_minor - allocated
+        """Money still available on the payment, from the authoritative ledger."""
+        return PaymentRepository(self.session).get_unapplied_cash_minor(self.tenant_id, payment_rec.id)
 
     def _get_invoice(self, invoice_id_or_number: str) -> Optional[InvoiceRecord]:
         stmt = select(InvoiceRecord).where(

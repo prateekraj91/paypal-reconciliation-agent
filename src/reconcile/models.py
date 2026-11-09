@@ -100,6 +100,7 @@ class EvidenceCode(str, Enum):
     AMOUNT_EXACT = "AMOUNT_EXACT"
     AMOUNT_PARTIAL = "AMOUNT_PARTIAL"
     AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
+    PAYMENT_RETURNED = "PAYMENT_RETURNED"
     CURRENCY_MISMATCH = "CURRENCY_MISMATCH"
     INVOICE_NOT_OPEN = "INVOICE_NOT_OPEN"
     INVOICE_ALREADY_CLAIMED = "INVOICE_ALREADY_CLAIMED"
@@ -571,6 +572,27 @@ def outstanding_cents(
 
     net_deductions = approved - total_returns
     return invoice.amount_cents - net_deductions
+
+
+def payment_net_cents(
+    payment_id: str,
+    gross_cents: int,
+    refunds: Iterable[Refund] = (),
+    reversals: Iterable[PaymentReversal] = (),
+) -> int:
+    """Gross payment less its completed refunds and reversals, never below zero.
+
+    A repeated return ID is counted once. Callers with a persisted ledger should
+    prefer its figure, which also accounts for applied money.
+    """
+    returned: dict[str, int] = {}
+    for r in refunds:
+        if r.parent_payment_id == payment_id and r.status.upper() == "COMPLETED":
+            returned[f"refund:{r.refund_id}"] = r.amount_cents
+    for rev in reversals:
+        if rev.parent_payment_id == payment_id and rev.status.upper() == "COMPLETED":
+            returned[f"reversal:{rev.reversal_id}"] = rev.amount_cents
+    return max(0, gross_cents - sum(returned.values()))
 
 
 def migrate_allocation_currency(

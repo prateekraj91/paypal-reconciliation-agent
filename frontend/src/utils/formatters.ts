@@ -400,3 +400,11 @@ export function getMatcherExplanation(
     details: details.length > 0 ? details : ['No open invoices matched reference, customer, or amount.'],
   };
 }
+
+/**
+ * Only an explicit approval from the backend enables Approve. A missing field
+ * or unknown status fails closed; the backend still decides at approval time.
+ */
+export function isApprovalEligible(proposal: { approval_eligible?: boolean; verifier_status?: string }): boolean {
+  return proposal.approval_eligible === true && proposal.verifier_status !== 'INVALID';
+}

@@ -12,7 +12,8 @@ end up disagreeing about the same ledger.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from dataclasses import replace
+from typing import Mapping, Optional, Sequence
 
 from .delivery import PaymentConflictError, resolve_delivery
 from .models import (
@@ -25,6 +26,7 @@ from .models import (
     PaymentReversal,
     Refund,
     cross_check_invoice_balance,
+    payment_net_cents,
 )
 from .normalize import canonical_reference
 
@@ -43,7 +45,10 @@ class MatchRun:
         settlements: Sequence[PaymentAllocation] = (),
         refunds: Sequence[Refund] = (),
         reversals: Sequence[PaymentReversal] = (),
+        payment_capacity: Optional[Mapping[str, int]] = None,
     ) -> None:
+        self.payment_capacity = payment_capacity
+        self.available_cents: dict[str, int] = {}  # payment_id -> money still available
         self.invoices: list[Invoice] = list(invoices)
         self.refunds: list[Refund] = list(refunds)
         self.reversals: list[PaymentReversal] = list(reversals)
@@ -66,6 +71,21 @@ class MatchRun:
         self.settled_payment_ids: set[str] = {
             s.payment_id for s in settlements
         }
+
+    def for_matching(self, p: Payment) -> Payment:
+        """The delivery as matchers must see it: for the money still available.
+
+        A payment whose money has all been returned keeps its gross amount here,
+        because `screen_delivery` blocks it before any amount is used.
+        """
+        if self.payment_capacity is not None and p.payment_id in self.payment_capacity:
+            available = self.payment_capacity[p.payment_id]
+        else:
+            available = payment_net_cents(
+                p.payment_id, p.amount_cents, self.refunds, self.reversals
+            )
+        self.available_cents[p.payment_id] = available
+        return replace(p, amount_cents=available) if 0 < available < p.amount_cents else p
 
     # ------------------------------------------------------------------
     # Delivery stream
