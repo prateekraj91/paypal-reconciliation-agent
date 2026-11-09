@@ -92,7 +92,9 @@ Promoting them would be inventing a reference from an unrelated field.
 The one transaction currently in the account is the Sandbox balance funding:
 `transaction_event_code` `T1900`, `transaction_subject` "Initial balance",
 status `S`, 5000.00 USD. It carries **no** `invoice_id` and **no**
-`custom_field`, because it is not an invoice payment.
+`custom_field`, because it is not an invoice payment. T1900 records are kept
+as provider evidence (`account_event.transaction_search`) and are never turned
+into payments, so the opening balance cannot appear as unapplied customer cash.
 
 So the live account confirms the envelope, the amount, status, timestamp and
 note mappings. It does **not** yet exercise `invoice_id` or `custom_field`;

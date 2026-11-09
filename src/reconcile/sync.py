@@ -113,6 +113,7 @@ class SyncResult:
     proposals: tuple[MatchProposal, ...] = ()
     verification: tuple[VerificationResult, ...] = ()
     transaction_evidence: Mapping[str, dict] = field(default_factory=dict)
+    non_payment_evidence: Mapping[str, dict] = field(default_factory=dict)
     invoice_evidence: Mapping[str, dict] = field(default_factory=dict)
     embedded_payment_evidence: Mapping[str, dict] = field(default_factory=dict)
 
@@ -176,6 +177,7 @@ def run_sync(
     search_error: Optional[str] = None
     payments: tuple[Payment, ...] = ()
     evidence: dict[str, dict] = {}
+    non_payment_evidence: dict[str, dict] = {}
     transactions_seen = 0
     skipped = 0
 
@@ -187,6 +189,10 @@ def run_sync(
     else:
         payments = canonical_payments(ingest.payments)
         evidence = dict(ingest.raw_by_id)
+        non_payment_evidence = {
+            txn_id: evidence[txn_id]
+            for txn_id in getattr(ingest, "non_payment_ids", ())
+        }
         transactions_seen = len(evidence)
         skipped = len(ingest.skipped)
 
@@ -244,6 +250,7 @@ def run_sync(
         proposals=proposals,
         verification=verification,
         transaction_evidence=evidence,
+        non_payment_evidence=non_payment_evidence,
         invoice_evidence=inv_evidence,
         embedded_payment_evidence=embedded_evidence,
     )

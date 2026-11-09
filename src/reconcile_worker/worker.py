@@ -714,6 +714,12 @@ class Worker:
                 source_view=SOURCE_TRANSACTION_SEARCH,
             )
 
+        if sync_result.non_payment_evidence:
+            workflow.record_non_payment_events(
+                tenant_id=tenant_id,
+                raw_payloads=dict(sync_result.non_payment_evidence),
+            )
+
         # 6. Run reconciliation and independent verification (no auto-approvals, no write-back)
         workflow.run_reconciliation(
             tenant_id=tenant_id,

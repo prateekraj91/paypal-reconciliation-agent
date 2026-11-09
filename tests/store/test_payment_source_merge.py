@@ -530,3 +530,48 @@ def test_merged_open_payment_still_matches_and_approves_once(store):
         ledger = compute_payment_ledger(s, tenant, payments(s, tenant)[0])
         assert (ledger.net_applied_minor, ledger.unapplied_minor) == (12500, 0)
         AuditRepository(s).verify_tenant_chain(tenant)
+
+
+TX_OPENING = "7KV68153MF312461A"
+
+
+def opening_balance_raw() -> dict:
+    return {
+        "transaction_info": {
+            "transaction_id": TX_OPENING,
+            "transaction_event_code": "T1900",
+            "transaction_status": "S",
+            "transaction_subject": "Initial balance",
+            "transaction_initiation_date": "2026-10-31T22:38:46Z",
+            "transaction_amount": {"currency_code": "USD", "value": "5000.00"},
+        }
+    }
+
+
+def opening_balance_stub() -> StubPayPal:
+    invoice = invoice_raw("INV2-A", "RECON-US-001", "125.00", [embedded_raw(TX_A, "125.00")])
+    return StubPayPal([invoice], [search_raw(TX_A, "125.00"), opening_balance_raw()])
+
+
+def test_opening_balance_is_kept_as_evidence_but_is_never_a_payment(store):
+    engine, tenant = store
+    run_sync_job(engine, tenant, opening_balance_stub(), "opening-1")
+    with engine.session() as s:
+        rows = payments(s, tenant)
+        assert [r.provider_payment_id for r in rows] == [TX_A]
+        assert sum(r.amount_minor for r in rows) == 12500
+        assert s.scalar(select(func.count()).select_from(ProposalRecord).where(ProposalRecord.tenant_id == tenant)) == 1
+        assert view_kinds(s, tenant, TX_OPENING) == ["account_event.transaction_search"]
+        record = s.scalars(select(ProviderRecord).where(
+            ProviderRecord.tenant_id == tenant, ProviderRecord.provider_record_id == TX_OPENING
+        )).one()
+        assert json.loads(record.payload_json)["transaction_info"]["transaction_event_code"] == "T1900"
+
+
+def test_repeat_sync_does_not_duplicate_opening_balance_evidence(store):
+    engine, tenant = store
+    run_sync_job(engine, tenant, opening_balance_stub(), "opening-1")
+    run_sync_job(engine, tenant, opening_balance_stub(), "opening-2")
+    with engine.session() as s:
+        assert len(payments(s, tenant)) == 1
+        assert view_kinds(s, tenant, TX_OPENING) == ["account_event.transaction_search"]

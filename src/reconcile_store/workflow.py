@@ -43,6 +43,7 @@ from .repositories import (
     AuditRepository,
     PaymentObservation,
     SETTLED_PAYER_PLACEHOLDER,
+    RECORD_KIND_NON_PAYMENT_EVENT,
     SOURCE_INVOICE_EMBEDDED,
     SOURCE_UNSPECIFIED,
 )
@@ -187,6 +188,31 @@ class StorageWorkflow:
 
         self.session.commit()
         return results
+
+    def record_non_payment_events(
+        self,
+        tenant_id: str,
+        raw_payloads: Dict[str, Dict[str, Any]],
+        provider: str = "paypal",
+    ) -> List[ProviderRecord]:
+        """Keep the evidence for provider account events without creating payments.
+
+        These records never reach the payments table, so they cannot enter
+        unapplied cash, matching, or the review queue.
+        """
+        records = [
+            self.provider_record_repo.store_record(
+                tenant_id=tenant_id,
+                provider=provider,
+                record_kind=RECORD_KIND_NON_PAYMENT_EVENT,
+                provider_record_id=provider_event_id,
+                raw_payload=raw_payload,
+                fail_on_conflict=False,
+            )
+            for provider_event_id, raw_payload in raw_payloads.items()
+        ]
+        self.session.commit()
+        return records
 
     def _store_payment_source(
         self,
