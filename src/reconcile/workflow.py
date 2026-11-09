@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from .deterministic import DeterministicMatcher
 from .interfaces import InvoiceSource, Matcher
@@ -81,6 +81,7 @@ def reconcile_payments(
     provider_settlements: Optional[Sequence[PaymentAllocation]] = None,
     refunds: Optional[Sequence[Refund]] = None,
     reversals: Optional[Sequence[PaymentReversal]] = None,
+    payment_capacity: Optional[Mapping[str, int]] = None,
 ) -> ReconciliationRunResult:
     """Execute end-to-end reconciliation for a batch of payments against an invoice source.
 
@@ -145,6 +146,8 @@ def reconcile_payments(
         match_kwargs["refunds"] = refunds
     if "reversals" in matcher_sig.parameters and reversals is not None:
         match_kwargs["reversals"] = reversals
+    if "payment_capacity" in matcher_sig.parameters and payment_capacity is not None:
+        match_kwargs["payment_capacity"] = payment_capacity
     proposals = active_matcher.match(payments, ingested_invoices, **match_kwargs)
 
     # 4. Independent verification
@@ -156,6 +159,7 @@ def reconcile_payments(
         existing_allocations=combined_allocs + list(settled_allocs),
         refunds=refunds or (),
         reversals=reversals or (),
+        payment_capacity=payment_capacity,
     )
 
     return ReconciliationRunResult(

@@ -30,7 +30,7 @@ Deciding what the canonical record for a payment_id is belongs to
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from .matching import MatchRun
 from .models import (
@@ -69,6 +69,7 @@ class BaselineMatcher:
         settlements: Sequence[PaymentAllocation] = (),
         refunds: Sequence[Refund] = (),
         reversals: Sequence[PaymentReversal] = (),
+        payment_capacity: Optional[Mapping[str, int]] = None,
     ) -> list[MatchProposal]:
         run = MatchRun(
             invoices,
@@ -76,9 +77,10 @@ class BaselineMatcher:
             settlements=settlements,
             refunds=refunds,
             reversals=reversals,
+            payment_capacity=payment_capacity,
         )
         ordered = sorted(payments, key=lambda p: (p.received_at, p.payment_id))
-        return [self._match_one(p, run) for p in ordered]
+        return [self._match_one(run.for_matching(p), run) for p in ordered]
 
     # ------------------------------------------------------------------
 
@@ -110,6 +112,12 @@ class BaselineMatcher:
             return Evidence(
                 EvidenceCode.PAYMENT_NOT_COMPLETED,
                 f"payment status is {canonical.status.value}",
+            )
+
+        if run.available_cents.get(p.payment_id, p.amount_cents) <= 0:
+            return Evidence(
+                EvidenceCode.PAYMENT_RETURNED,
+                f"payment {p.payment_id} has been fully refunded or reversed; no money remains to allocate",
             )
 
         return None

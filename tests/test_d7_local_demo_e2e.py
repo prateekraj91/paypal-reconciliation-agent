@@ -1,7 +1,7 @@
 """End-to-end integration and workflow verification for isolated local demo database.
 
 Verifies:
-1. Conclusive database isolation (PostgreSQL on localhost / ::1, database 'reconcile_demo').
+1. Isolation: the suite seeds and approves, so it runs on a disposable database only.
 2. Alembic migration head revision ('0005_d6_ai_investigations').
 3. Deterministic synthetic records for all 10 fintech scenarios + 1 adversarial injection case.
 4. Complete labelling with '(DEMO)'.
@@ -20,10 +20,8 @@ import pytest
 from sqlalchemy import text
 from datetime import datetime, timezone
 
-from reconcile.paypal import load_dotenv
-
-# Ensure local demo configuration is loaded
-load_dotenv(".env.demo", override=True)
+from alembic import command
+from alembic.config import Config
 
 from reconcile_store.config import DatabaseConfig
 from reconcile_store.db import DatabaseEngine
@@ -42,48 +40,23 @@ from reconcile_api.local_demo_dataset import seed_local_demo_dataset
 
 
 @pytest.fixture(scope="module")
-def demo_engine():
-    """Verify isolation and provide connection to local demo database."""
-    if os.path.exists(".env.demo"):
-        load_dotenv(".env.demo", override=True)
-    config = DatabaseConfig.from_env()
-    engine = DatabaseEngine(config)
-
-    # 1. Conclusively verify isolation before yielding
-    with engine.session() as session:
-        if engine.engine.dialect.name == "postgresql":
-            row = session.execute(
-                text("SELECT inet_server_addr(), current_database(), current_user")
-            ).fetchone()
-            server_ip, db_name, db_user = str(row[0]), str(row[1]), str(row[2])
-
-            # Must be local loopback
-            assert server_ip in ("::1", "127.0.0.1", "None"), (
-                f"SECURITY ERROR: Target database server is not local! inet_server_addr={server_ip}"
-            )
-            assert db_name == "reconcile_demo", (
-                f"SECURITY ERROR: Target database is not 'reconcile_demo'! current_database={db_name}"
-            )
-
+def demo_engine(tmp_path_factory):
+    """Provide a disposable database migrated to head; never the populated demo database."""
+    url = f"sqlite:///{tmp_path_factory.mktemp('demo_e2e') / 'demo_e2e.db'}"
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(alembic_cfg, "head")
+    engine = DatabaseEngine(DatabaseConfig(url=url))
     yield engine
-
-    # Teardown: Reseed to ensure clean unapproved state is left for interactive operator review
-    with engine.session() as session:
-        seed_local_demo_dataset(session, tenant_id="demo_merchant", force=True)
+    engine.dispose()
 
 
 def test_01_database_isolation_and_migration_head(demo_engine):
-    """Verify target database is isolated local PostgreSQL at migration head."""
+    """Verify the suite runs on its disposable database at migration head."""
+    assert demo_engine.engine.dialect.name == "sqlite"
     with demo_engine.session() as s:
-        if demo_engine.engine.dialect.name == "postgresql":
-            # Check server host and database name
-            res = s.execute(text("SELECT inet_server_addr(), current_database()")).fetchone()
-            assert str(res[0]) in ("::1", "127.0.0.1", "None")
-            assert res[1] == "reconcile_demo"
-
-            # Check alembic migration revision
-            rev = s.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            assert rev == "0005_d6_ai_investigations", f"Expected head revision, got {rev}"
+        rev = s.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        assert rev == "0005_d6_ai_investigations", f"Expected head revision, got {rev}"
 
 
 def test_02_idempotent_seeding_and_no_auto_approvals(demo_engine):
@@ -345,9 +318,10 @@ def test_08_api_dashboard_summary_and_currency_counts(demo_engine):
     assert resp.status_code == 200
     data = resp.json()
 
-    # Verify counts: 6 actionable out of 11 unresolved (safety-blocked INJECTION-011 and INVESTIGATE-010 excluded)
+    # REVERSAL-008 has no net cash, so it is NO_MATCH. INJECTION-011 and INVESTIGATE-010
+    # are safety-blocked. REFUND-007 is proposed at its $200 net.
     counts = data["counts"]
-    assert counts["actionable_proposals"] == 6
+    assert counts["actionable_proposals"] == 5
     assert counts["unresolved_proposals"] == 11
 
     # Verify independent currency counts

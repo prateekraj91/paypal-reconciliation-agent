@@ -154,27 +154,26 @@ class ProposalRepository(BaseRepository[ProposalRecord]):
         status: Optional[str] = None,
         run_id: Optional[str] = None,
         payment_id: Optional[str] = None,
-        limit: int = 50,
+        limit: Optional[int] = 50,
         offset: int = 0,
     ) -> Sequence[ProposalRecord]:
-        """List proposals for a tenant with optional filtering by status, run_id, or payment_id."""
+        """List proposals with optional filters; the status filter applies before pagination."""
         stmt = select(ProposalRecord).where(ProposalRecord.tenant_id == tenant_id)
         if run_id:
             stmt = stmt.where(ProposalRecord.run_id == run_id)
         if payment_id:
             stmt = stmt.where(ProposalRecord.payment_id == payment_id)
-        stmt = stmt.order_by(ProposalRecord.created_at.desc()).limit(limit).offset(offset)
-        proposals = self.session.scalars(stmt).all()
+        stmt = stmt.order_by(ProposalRecord.created_at.desc(), ProposalRecord.id)
+        proposals = list(self.session.scalars(stmt).all())
         if status:
             norm_status = status.upper()
-            filtered = []
-            for p in proposals:
-                decisions = p.decisions
-                curr_status = decisions[-1].decision_type if decisions else "PENDING"
-                if curr_status == norm_status or (norm_status == "PROPOSED" and curr_status == "PENDING"):
-                    filtered.append(p)
-            return filtered
-        return proposals
+            proposals = [
+                p
+                for p in proposals
+                if (current := (p.decisions[-1].decision_type if p.decisions else "PENDING")) == norm_status
+                or (norm_status == "PROPOSED" and current == "PENDING")
+            ]
+        return proposals[offset:] if limit is None else proposals[offset : offset + limit]
 
 
 class VerificationRepository(BaseRepository[VerificationRecord]):

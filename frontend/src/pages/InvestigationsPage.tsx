@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { InvestigationDetail } from '../types/api';
-import { StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { LoadErrorBanner, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { NewInvestigationModal } from '../components/Modals';
 import { getInvestigationEmptyLabels } from '../utils/formatters';
 
@@ -24,6 +24,7 @@ export function InvestigationsPage({
   onSelectInvestigation: (invId: string) => void;
   initialTargetId?: string;
 }) {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [investigations, setInvestigations] = useState<InvestigationDetail[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'NEEDS_REVIEW' | 'COMPLETED' | 'INVALID'>('ALL');
@@ -32,6 +33,7 @@ export function InvestigationsPage({
 
   const fetchInvestigations = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listInvestigations({
         tenantId,
@@ -41,6 +43,7 @@ export function InvestigationsPage({
       setInvestigations(data.investigations);
     } catch (err) {
       console.error('Failed to load investigations', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setIsLoading(false);
     }
@@ -74,6 +77,7 @@ export function InvestigationsPage({
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <LoadErrorBanner message={loadError} />
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>

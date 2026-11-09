@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { TransactionItem, TransactionDetail } from '../types/api';
-import { MoneyDisplay, StatusBadge, RecordTypeBadge, VerifierStatusBadge, HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { LoadErrorBanner, MoneyDisplay, StatusBadge, RecordTypeBadge, VerifierStatusBadge, HashBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { getTransactionEmptyLabels } from '../utils/formatters';
 
 export function TransactionsPage({
@@ -26,6 +26,7 @@ export function TransactionsPage({
   onStartInvestigation: (paymentId: string) => void;
   onInspectInvestigation: (invId: string) => void;
 }) {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [transactions, setTransactions] = useState<TransactionItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -41,6 +42,7 @@ export function TransactionsPage({
 
   const fetchTransactions = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listTransactions({
         tenantId,
@@ -54,6 +56,7 @@ export function TransactionsPage({
       setTotalCount(data.total_count);
     } catch (err) {
       console.error('Failed to load transactions', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setIsLoading(false);
     }
@@ -84,6 +87,7 @@ export function TransactionsPage({
 
   return (
     <div className="space-y-6 animate-fade-in relative">
+      <LoadErrorBanner message={loadError} />
       {/* Header & Filter Controls */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>

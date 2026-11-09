@@ -12,10 +12,11 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { InvoiceItem, InvoiceDetail } from '../types/api';
-import { MoneyDisplay, StatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { LoadErrorBanner, MoneyDisplay, StatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { getInvoiceEmptyLabels } from '../utils/formatters';
 
 export function InvoicesPage({ tenantId }: { tenantId: string }) {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
@@ -30,6 +31,7 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
 
   const fetchInvoices = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listInvoices({
         tenantId,
@@ -42,6 +44,7 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
       setTotalCount(data.total_count);
     } catch (err) {
       console.error('Failed to load invoices', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setIsLoading(false);
     }
@@ -72,6 +75,7 @@ export function InvoicesPage({ tenantId }: { tenantId: string }) {
 
   return (
     <div className="space-y-6 animate-fade-in relative">
+      <LoadErrorBanner message={loadError} />
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>

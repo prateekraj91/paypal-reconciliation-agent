@@ -9,6 +9,7 @@ from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError, ConflictError, StaleVersionError
+from ..ledger import PaymentLedger, compute_payment_ledger, is_completed_return
 from ..schema import (
     InvoiceRecord,
     AllocationRecord,
@@ -172,122 +173,83 @@ class InvoiceRepository(BaseRepository[InvoiceRecord]):
         )
         return int(self.session.scalar(stmt) or 0)
 
-    def get_total_returns_minor(self, tenant_id: str, invoice_id: str) -> int:
-        """Sum of all completed refunds and reversals that impair allocations or settlements on this invoice.
+    def _linked_ledgers(self, tenant_id: str, invoice_id: str) -> tuple[list[PaymentLedger], int]:
+        """Ledgers of payments applied to this invoice, plus settlements with no known payment."""
+        allocations = self.session.scalars(
+            select(AllocationRecord).where(
+                AllocationRecord.tenant_id == tenant_id,
+                AllocationRecord.invoice_id == invoice_id,
+            )
+        ).all()
+        settlements = self.session.scalars(
+            select(ProviderSettlementRecord).where(
+                ProviderSettlementRecord.tenant_id == tenant_id,
+                ProviderSettlementRecord.invoice_id == invoice_id,
+            )
+        ).all()
 
-        Accounting treatment:
-        1. Explicit returns: Refunds/reversals with invoice_id == invoice_id or allocation_id matching
-           an allocation on this invoice impair this invoice directly.
-        2. Payment-level returns (invoice_id is None): For each payment linked to this invoice,
-           unapplied cash absorbs payment returns first. Any excess return beyond unapplied cash
-           impairs the payment's active allocations.
-        """
+        payments: dict[str, PaymentRecord] = {}
+        unlinked_settled = 0
+        for payment_id in {a.payment_id for a in allocations}:
+            payment = self.session.get(PaymentRecord, payment_id)
+            if payment is not None and payment.tenant_id == tenant_id:
+                payments[payment.id] = payment
+        for settlement in settlements:
+            payment = None
+            if settlement.payment_id:
+                payment = self.session.get(PaymentRecord, settlement.payment_id)
+            else:
+                payment = self.session.scalars(
+                    select(PaymentRecord).where(
+                        PaymentRecord.tenant_id == tenant_id,
+                        PaymentRecord.provider == settlement.provider,
+                        PaymentRecord.provider_payment_id == settlement.provider_settlement_id,
+                    )
+                ).first()
+            if payment is None or payment.tenant_id != tenant_id:
+                unlinked_settled += settlement.amount_minor
+            else:
+                payments[payment.id] = payment
+
+        ledgers = [compute_payment_ledger(self.session, tenant_id, p) for p in payments.values()]
+        return ledgers, unlinked_settled
+
+    def _require_invoice(self, tenant_id: str, invoice_id: str) -> InvoiceRecord:
         invoice = self.get_invoice(tenant_id, invoice_id)
         if invoice is None:
             raise EntityNotFoundError(f"Invoice '{invoice_id}' not found for tenant '{tenant_id}'")
+        return invoice
 
-        stmt_alloc = select(AllocationRecord).where(
-            AllocationRecord.tenant_id == tenant_id,
-            AllocationRecord.invoice_id == invoice_id,
-        )
-        allocs = list(self.session.scalars(stmt_alloc).all())
+    def get_total_returns_minor(self, tenant_id: str, invoice_id: str) -> int:
+        """Completed returns that have reversed money applied to this invoice.
 
-        stmt_sett = select(ProviderSettlementRecord).where(
-            ProviderSettlementRecord.tenant_id == tenant_id,
-            ProviderSettlementRecord.invoice_id == invoice_id,
-        )
-        settlements = list(self.session.scalars(stmt_sett).all())
+        Before anything is applied, returns tagged with the invoice are reported
+        for operator context; they cannot affect the balance.
+        """
+        self._require_invoice(tenant_id, invoice_id)
+        ledgers, unlinked_settled = self._linked_ledgers(tenant_id, invoice_id)
+        if not ledgers and not unlinked_settled:
+            tagged = self.session.scalars(
+                select(RefundRecord).where(
+                    RefundRecord.tenant_id == tenant_id,
+                    RefundRecord.invoice_id == invoice_id,
+                )
+            ).all()
+            return sum(r.amount_minor for r in tagged if is_completed_return(r))
+        lines = (ledger.line_for_invoice(invoice_id) for ledger in ledgers)
+        return sum(line.returned_minor for line in lines if line is not None)
 
-        if not allocs and not settlements:
-            stmt_direct_ref = select(func.coalesce(func.sum(RefundRecord.amount_minor), 0)).where(
-                RefundRecord.tenant_id == tenant_id,
-                RefundRecord.invoice_id == invoice_id,
-                RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
-            )
-            return int(self.session.scalar(stmt_direct_ref) or 0)
-
-        total_returns = 0
-
-        # Direct returns targeting this invoice or specific allocations/settlements
-        alloc_ids = [a.id for a in allocs]
-        sett_ids = [s.id for s in settlements]
-
-        direct_conditions = [RefundRecord.invoice_id == invoice_id]
-        if alloc_ids:
-            direct_conditions.append(RefundRecord.allocation_id.in_(alloc_ids))
-        if sett_ids:
-            direct_conditions.append(RefundRecord.settlement_id.in_(sett_ids))
-
-        stmt_direct = select(RefundRecord).where(
-            RefundRecord.tenant_id == tenant_id,
-            RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
-            or_(*direct_conditions),
-        )
-        direct_refs = list(self.session.scalars(stmt_direct).all())
-        direct_ref_ids = set()
-        for r in direct_refs:
-            direct_ref_ids.add(r.id)
-            total_returns += r.amount_minor
-
-        # Payment-level returns (invoice_id is None and allocation_id is None)
-        linked_payment_ids = set()
-        for a in allocs:
-            linked_payment_ids.add(a.payment_id)
-        for s in settlements:
-            if s.payment_id:
-                linked_payment_ids.add(s.payment_id)
-
-        for p_id in linked_payment_ids:
-            payment = self.session.get(PaymentRecord, p_id)
-            if not payment or payment.tenant_id != tenant_id:
-                continue
-
-            stmt_all_p_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
-                AllocationRecord.tenant_id == tenant_id,
-                AllocationRecord.payment_id == p_id,
-            )
-            total_p_allocated = int(self.session.scalar(stmt_all_p_alloc) or 0)
-            this_inv_p_allocated = sum(a.amount_minor for a in allocs if a.payment_id == p_id)
-            unallocated_cash = max(0, payment.amount_minor - total_p_allocated)
-
-            stmt_p_refs = select(RefundRecord).where(
-                RefundRecord.tenant_id == tenant_id,
-                RefundRecord.parent_payment_id.in_([payment.id, payment.provider_payment_id]),
-                RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
-                RefundRecord.invoice_id.is_(None),
-                RefundRecord.allocation_id.is_(None),
-            )
-            if direct_ref_ids:
-                stmt_p_refs = stmt_p_refs.where(RefundRecord.id.not_in(direct_ref_ids))
-
-            p_refs = list(self.session.scalars(stmt_p_refs).all())
-            p_ref_total = sum(r.amount_minor for r in p_refs)
-
-            if p_ref_total > unallocated_cash:
-                excess = p_ref_total - unallocated_cash
-                impairment = min(this_inv_p_allocated, excess)
-                total_returns += impairment
-
-        gross_deductions = sum(a.amount_minor for a in allocs) + sum(s.amount_minor for s in settlements)
-        return min(gross_deductions, total_returns)
+    def get_net_applied_minor(self, tenant_id: str, invoice_id: str) -> int:
+        """Money currently applied to this invoice, net of returns, each payment counted once."""
+        self._require_invoice(tenant_id, invoice_id)
+        ledgers, unlinked_settled = self._linked_ledgers(tenant_id, invoice_id)
+        lines = (ledger.line_for_invoice(invoice_id) for ledger in ledgers)
+        return unlinked_settled + sum(line.net_minor for line in lines if line is not None)
 
     def get_ledger_outstanding_minor(self, tenant_id: str, invoice_id: str) -> int:
-        """Application-owned ledger balance:
-        outstanding = invoice.total_minor - net_deductions
-        where net_deductions = max(0, sum(approved allocations) + sum(provider settlements) - sum(returns)).
-
-        This accounts for both application approvals and provider-reported settlements
-        minus completed refunds and reversals, restoring balance when payments are returned.
-        """
-        invoice = self.get_invoice(tenant_id, invoice_id)
-        if invoice is None:
-            raise EntityNotFoundError(f"Invoice '{invoice_id}' not found for tenant '{tenant_id}'")
-        allocated = self.get_total_allocated_minor(tenant_id, invoice_id)
-        settled = self.get_total_settled_minor(tenant_id, invoice_id)
-        returns = self.get_total_returns_minor(tenant_id, invoice_id)
-        gross_deductions = allocated + settled
-        net_deductions = max(0, gross_deductions - returns)
-        return max(0, invoice.total_minor - net_deductions)
+        """Invoice total less money currently applied to it, never below zero."""
+        invoice = self._require_invoice(tenant_id, invoice_id)
+        return max(0, invoice.total_minor - self.get_net_applied_minor(tenant_id, invoice_id))
 
     def validate_eligibility_for_allocation(self, invoice: InvoiceRecord) -> None:
         """Invariant I8: DRAFT, CANCELLED and PAID invoices are ineligible for new allocations."""

@@ -12,11 +12,12 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { ReconciliationRunItem, ProposalItem } from '../types/api';
-import { MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
+import { LoadErrorBanner, MoneyDisplay, StatusBadge, VerifierStatusBadge, LoadingSpinner, EmptyState } from '../components/Common';
 import { RunTriggerModal, ProposalApprovalModal, ProposalRejectModal } from '../components/Modals';
-import { getMatcherExplanation } from '../utils/formatters';
+import { isApprovalEligible, getMatcherExplanation } from '../utils/formatters';
 
 export function ReconciliationPage({ tenantId }: { tenantId: string }) {
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [runs, setRuns] = useState<ReconciliationRunItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isTriggerModalOpen, setIsTriggerModalOpen] = useState(false);
@@ -34,6 +35,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
 
   const fetchRuns = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const data = await api.listRuns(tenantId);
       setRuns(data.runs);
@@ -42,6 +44,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
       }
     } catch (err) {
       console.error('Failed to load runs', err);
+      setLoadError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setIsLoading(false);
     }
@@ -107,6 +110,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <LoadErrorBanner message={loadError} />
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
@@ -283,7 +287,9 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                               <div className="flex items-center justify-end gap-1.5">
                                 <button
                                   onClick={() => setSelectedProposalForApproval(p)}
-                                  className="btn btn-success py-1 px-2.5 text-[11px]"
+                                  disabled={!isApprovalEligible(p)}
+                                  title={isApprovalEligible(p) ? undefined : p.approval_prohibited_reason || 'Approval prohibited by safety verifier'}
+                                  className={`btn py-1 px-2.5 text-[11px] ${isApprovalEligible(p) ? 'btn-success' : 'btn-secondary opacity-50 cursor-not-allowed'}`}
                                 >
                                   Approve
                                 </button>

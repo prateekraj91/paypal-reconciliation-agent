@@ -1,12 +1,89 @@
-# paypal-recon-agent (core)
+# paypal-recon-agent
 
-Framework-independent core of a reconciliation exception agent for PayPal.
-This milestone has no FastAPI, SQLite, React, PayPal SDK, or AI. Standard library only.
+Reconciliation exception agent for PayPal: it matches payments to invoices,
+verifies each match independently, and queues it for a person to approve. All
+data in this repository is synthetic or from the PayPal Sandbox.
 
-## Run
+`src/reconcile` is the framework-independent matching core. `src/reconcile_store`
+is the ledger and approval engine, `src/reconcile_api` the FastAPI service,
+`src/reconcile_investigator` the advisory AI investigator, and `frontend` the
+operator dashboard.
+
+## How a payment is reconciled
+
+1. **Matching.** Deterministic matchers propose allocations from invoice
+   references, customer context and amounts. They match against the money left
+   on the payment after returns, never its gross amount.
+2. **Independent verification.** `verify_proposals` rechecks every proposal from
+   source records; amount alone can never pass.
+3. **AI investigation (advisory).** An investigator can explain an exception and
+   suggest a resolution. It cannot change financial records. A separate safety
+   verifier checks its output, including for prompt injection.
+4. **Human approval.** Only an operator's approval creates an allocation. Inside
+   the approval transaction the proposal, payment and invoices are locked and
+   the verifier and capacity checks run again on current data. A proposal that
+   no longer fits is refused with an explanation, never reduced.
+
+Every decision is written to a SHA-256 hash-chained audit trail.
+
+## Refund and reversal accounting
+
+`src/reconcile_store/ledger.py` is the single source for payment and invoice
+balances. All amounts are integer minor units.
+
+- Only completed returns count, and a repeated provider event adds nothing.
+- An allocation and a provider settlement for the same payment and invoice are
+  the same money and count once.
+- A return linked to an allocation or settlement reverses that line. A return
+  naming an invoice reverses this payment's line on that invoice, if the line
+  existed when the return happened.
+- Any other return comes out of unapplied cash first, then reverses applied
+  lines oldest first, restoring each cent once.
+- A return or applied line in another currency leaves the payment with zero
+  available cash until someone resolves it.
+
+## Service and dashboard
+
+    python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+    cp .env.example .env   # then fill in your own values
+    .venv/bin/alembic upgrade head
+    PYTHONPATH=src .venv/bin/uvicorn reconcile_api.main:app --port 8000
+    npm --prefix frontend install && npm --prefix frontend run dev
+
+`.env.example` lists every setting. The main ones are `RECONCILE_DB_URL`,
+`ADMIN_API_KEY`, the `PAYPAL_*` credentials, `CORS_ALLOWED_ORIGINS` (empty by
+default, so no cross-origin browser access) and `MODEL_PROVIDER`.
+
+The dashboard's seed action, or `POST /admin/demo/seed`, loads a synthetic demo
+tenant (`demo_merchant`). Use a local database for it.
+
+## Tests
+
+    PYTHONPATH=src .venv/bin/pytest tests/ -q
+    npm --prefix frontend test
+    npm --prefix frontend run build
+
+`tests/conftest.py` ignores the repository's `.env` files and refuses PostgreSQL
+connections to anything except a local disposable database. Set
+`TEST_POSTGRESQL_URL` to a local database to include the PostgreSQL concurrency
+tests; without it they are skipped.
+
+## Security and limitations
+
+- One shared `ADMIN_API_KEY` protects the admin API, and any holder can act for
+  any tenant. Per-user, per-tenant authorization is required before more than
+  one merchant uses a deployment.
+- The reviewer name on a decision is supplied by the caller, not authenticated.
+- A fully reversed payment still shows as reconciled in the existing status
+  field; use its net and unapplied amounts.
+- Proposals stored before a ledger change stay as they are. They are re-evaluated
+  live and blocked if they no longer fit; run reconciliation again to regenerate.
+- This has been exercised with synthetic and Sandbox data only.
+
+## Core matcher
 
     pip install pytest
-    python -m pytest -q                 # 622 tests
+    PYTHONPATH=src python -m pytest -q
     PYTHONPATH=src python -m reconcile  # matcher scorecards on the synthetic dataset
     PYTHONPATH=src python -m reconcile 7   # same, different seed
     PYTHONPATH=src python -m reconcile --paypal        # invoice ingestion only
