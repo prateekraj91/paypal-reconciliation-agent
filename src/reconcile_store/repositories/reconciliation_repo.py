@@ -148,6 +148,34 @@ class ProposalRepository(BaseRepository[ProposalRecord]):
         )
         return self.session.scalars(stmt).all()
 
+    def list_proposals(
+        self,
+        tenant_id: str,
+        status: Optional[str] = None,
+        run_id: Optional[str] = None,
+        payment_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Sequence[ProposalRecord]:
+        """List proposals for a tenant with optional filtering by status, run_id, or payment_id."""
+        stmt = select(ProposalRecord).where(ProposalRecord.tenant_id == tenant_id)
+        if run_id:
+            stmt = stmt.where(ProposalRecord.run_id == run_id)
+        if payment_id:
+            stmt = stmt.where(ProposalRecord.payment_id == payment_id)
+        stmt = stmt.order_by(ProposalRecord.created_at.desc()).limit(limit).offset(offset)
+        proposals = self.session.scalars(stmt).all()
+        if status:
+            norm_status = status.upper()
+            filtered = []
+            for p in proposals:
+                decisions = p.decisions
+                curr_status = decisions[-1].decision_type if decisions else "PENDING"
+                if curr_status == norm_status or (norm_status == "PROPOSED" and curr_status == "PENDING"):
+                    filtered.append(p)
+            return filtered
+        return proposals
+
 
 class VerificationRepository(BaseRepository[VerificationRecord]):
     """Repository for independent verifications.

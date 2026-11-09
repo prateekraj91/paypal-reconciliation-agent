@@ -8,13 +8,17 @@ Provides:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import json
 import logging
-from typing import Any, Optional
+import os
+import uuid
+from typing import Any, Optional, List, Dict
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import text
+from sqlalchemy import text, select, or_, and_, func, desc
 from sqlalchemy.orm import Session
 
 from reconcile.paypal import PayPalAPIError, PayPalClient, PayPalTimeoutError
@@ -24,7 +28,43 @@ from reconcile_store.repositories.webhook_repo import (
     InvalidWebhookStateTransitionError,
 )
 from reconcile_store.repositories.job_repo import JobRepository
-from reconcile_store.repositories.reconciliation_repo import ReconciliationRunRepository
+from reconcile_store.repositories.reconciliation_repo import (
+    ReconciliationRunRepository,
+    ProposalRepository,
+    VerificationRepository,
+    DecisionRepository,
+)
+from reconcile_store.repositories.payment_repo import PaymentRepository, IneligiblePaymentError
+from reconcile_store.repositories.invoice_repo import InvoiceRepository, IneligibleInvoiceError
+from reconcile_store.repositories.audit_repo import AuditRepository
+from reconcile_store.repositories.allocation_repo import AllocationRepository
+from reconcile_store.repositories.settlement_repo import ProviderSettlementRepository
+from reconcile_store.repositories.refund_repo import RefundRepository
+from reconcile_store.repositories.investigation_repo import InvestigationRepository
+from reconcile_store.schema import (
+    PaymentRecord,
+    InvoiceRecord,
+    ProposalRecord,
+    ProposalAllocationRecord,
+    AllocationRecord,
+    ProviderSettlementRecord,
+    RefundRecord,
+    VerificationRecord,
+    DecisionRecord,
+    AuditEventRecord,
+    InvestigationRecord,
+)
+from reconcile_store.audit import GENESIS_HASH, AuditIntegrityError
+from reconcile_store.approval import (
+    ApprovalService,
+    VerificationFailedError,
+    ApprovalError,
+    ProposalSafetyEvaluation,
+    evaluate_proposal_investigation_safety,
+)
+from reconcile_store.workflow import StorageWorkflow
+from reconcile_store.repositories.base import ConflictError, StaleVersionError, EntityNotFoundError
+from reconcile_api.demo_data import seed_demo_data
 
 from contextlib import asynccontextmanager
 from reconcile_store.bootstrap import bootstrap_database
@@ -50,12 +90,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PayPal Reconciliation Agent API",
-    version="0.1.0",
-    description="D4 Verified Webhook Ingestion, Background Processing and Reconciliation API",
+    version="0.2.0",
+    description="Fintech Reconciliation Agent API & Operator Dashboard Backend",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 REQUIRED_PAYPAL_HEADERS = (
@@ -202,6 +250,64 @@ class InvestigationCreateRequest(BaseModel):
         if clean not in ("payment", "proposal", "invoice", "refund", "reversal"):
             raise ValueError(f"Invalid target_type '{v}'. Must be one of: payment, proposal, invoice, refund, reversal")
         return clean
+
+
+class ProposalApproveRequest(BaseModel):
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
+    notes: Optional[str] = Field(default=None, max_length=1000, description="Optional notes or audit context")
+    tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
+
+
+class ProposalRejectRequest(BaseModel):
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
+    reason: str = Field(..., min_length=1, max_length=1000, description="Mandatory reason for proposal rejection")
+    tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
+
+
+class InvestigationDecisionRequest(BaseModel):
+    reviewer: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Operator identifier supplied for local demo audit logging. "
+            "NOTE: This is a self-reported operator label for local accountability, "
+            "not a cryptographically authenticated multi-user identity."
+        ),
+    )
+    notes: Optional[str] = Field(default=None, max_length=1000, description="Optional notes or explanation")
+    tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
+    proposal_id: Optional[str] = Field(default=None, description="Optional explicit proposal ID to link and approve")
+
+
+class RunTriggerRequest(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="Target tenant ID")
+    matcher_name: Optional[str] = Field(default="deterministic_v2", max_length=64)
+    matcher_version: Optional[str] = Field(default="2.0.0", max_length=32)
+
+
+class DemoSeedRequest(BaseModel):
+    tenant_id: Optional[str] = Field(default="demo_merchant", max_length=64)
+    force: Optional[bool] = Field(default=False, description="Whether to reseed even if data already exists")
+
 
 
 
@@ -667,6 +773,8 @@ def list_runs(
                 "matcher_version": r.matcher_version,
                 "summary_metrics": getattr(r, "metrics", None) if getattr(r, "metrics", None) is not None else (json.loads(r.metrics_json) if r.metrics_json else {}),
                 "created_at": r.run_at.isoformat() if r.run_at else None,
+                "run_at": r.run_at.isoformat() if r.run_at else None,
+                "executed_at": r.run_at.isoformat() if r.run_at else None,
             }
             for r in runs
         ]
@@ -846,3 +954,1755 @@ def get_investigation(
         "created_at": inv.created_at.isoformat() if inv.created_at else None,
         "completed_at": inv.completed_at.isoformat() if inv.completed_at else None,
     }
+
+
+# --------------------------------------------------------------------------
+# D7 Fintech Operator Dashboard & Workflow Endpoints
+# --------------------------------------------------------------------------
+
+
+@app.get("/admin/dashboard/summary", status_code=status.HTTP_200_OK)
+def get_dashboard_summary(
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Provide overall business reconciliation health and operational summary metrics."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    pay_repo = PaymentRepository(session)
+    inv_repo = InvoiceRepository(session)
+    prop_repo = ProposalRepository(session)
+    invg_repo = InvestigationRepository(session)
+    run_repo = ReconciliationRunRepository(session)
+
+    payments = list(pay_repo.list_payments(effective_tenant))
+    invoices = list(inv_repo.list_invoices(effective_tenant))
+    runs = list(run_repo.list_runs(effective_tenant))
+    investigations = list(invg_repo.list_investigations(effective_tenant, limit=100))
+
+    financial_totals: dict[str, dict[str, Any]] = {}
+
+    def get_currency_bucket(curr: str) -> dict[str, Any]:
+        c = (curr or "USD").upper()
+        if c not in financial_totals:
+            financial_totals[c] = {
+                "currency": c,
+                "payments_amount_minor": 0,
+                "invoices_amount_minor": 0,
+                "invoices_outstanding_minor": 0,
+                "reconciled_amount_minor": 0,
+                "unapplied_cash_minor": 0,
+                "unapplied_amount_minor": 0,
+                "payments_count": 0,
+                "invoices_count": 0,
+            }
+        return financial_totals[c]
+
+    open_exceptions_list = []
+    unmatched_count = 0
+    reconciled_count = 0
+    partially_reconciled_count = 0
+
+    for p in payments:
+        bucket = get_currency_bucket(p.currency)
+        bucket["payments_count"] += 1
+        bucket["payments_amount_minor"] += p.amount_minor
+        unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
+        bucket["unapplied_cash_minor"] += unapplied
+        bucket["unapplied_amount_minor"] += unapplied
+        allocated = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
+        bucket["reconciled_amount_minor"] += allocated
+
+        if unapplied > 0:
+            open_exceptions_list.append({
+                "id": p.id,
+                "provider_payment_id": p.provider_payment_id,
+                "amount_minor": p.amount_minor,
+                "currency": p.currency,
+                "payer_name": p.payer_name,
+                "unapplied_cash_minor": unapplied,
+                "received_at": p.received_at.isoformat() if p.received_at else None,
+                "status": "UNMATCHED" if unapplied == p.amount_minor else "PARTIAL",
+            })
+            if unapplied == p.amount_minor:
+                unmatched_count += 1
+            else:
+                partially_reconciled_count += 1
+        else:
+            reconciled_count += 1
+
+    for inv in invoices:
+        bucket = get_currency_bucket(inv.currency)
+        bucket["invoices_count"] += 1
+        bucket["invoices_amount_minor"] += inv.total_minor
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
+        bucket["invoices_outstanding_minor"] += outstanding
+
+    stmt_props = select(ProposalRecord).where(ProposalRecord.tenant_id == effective_tenant)
+    proposals = session.scalars(stmt_props).all()
+    pending_proposals = 0
+    actionable_proposals = 0
+    approved_proposals = 0
+    rejected_proposals = 0
+
+    for prop in proposals:
+        decs = prop.decisions
+        dec_status = decs[-1].decision_type if decs else "PENDING"
+        if dec_status == "APPROVED":
+            approved_proposals += 1
+        elif dec_status == "REJECTED":
+            rejected_proposals += 1
+        else:
+            pending_proposals += 1
+            # Actionable: PROPOSED outcome with verified safety checks and non-empty allocations
+            safety_eval = evaluate_proposal_investigation_safety(
+                session=session,
+                tenant_id=effective_tenant,
+                proposal=prop,
+            )
+            if (
+                prop.outcome == "PROPOSED"
+                and prop.verifier_status == "VERIFIED"
+                and safety_eval.approval_eligible
+                and len(prop.allocations) > 0
+            ):
+                actionable_proposals += 1
+
+    invg_needs_review = sum(1 for i in investigations if i.status == "NEEDS_REVIEW")
+    invg_completed = sum(1 for i in investigations if i.status == "COMPLETED")
+    invg_invalid = sum(1 for i in investigations if i.status == "INVALID")
+
+    return {
+        "tenant_id": effective_tenant,
+        "counts": {
+            "total_payments": len(payments),
+            "reconciled_payments": reconciled_count,
+            "unmatched_payments": unmatched_count,
+            "partially_reconciled_payments": partially_reconciled_count,
+            "open_exceptions": len(open_exceptions_list),
+            "total_invoices": len(invoices),
+            "total_proposals": len(proposals),
+            "pending_proposals": pending_proposals,
+            "actionable_proposals": actionable_proposals,
+            "unresolved_proposals": pending_proposals,
+            "approved_proposals": approved_proposals,
+            "rejected_proposals": rejected_proposals,
+            "total_investigations": len(investigations),
+            "investigations_needs_review": invg_needs_review,
+            "investigations_completed": invg_completed,
+            "investigations_invalid": invg_invalid,
+        },
+        "financial_totals": financial_totals,
+        "recent_runs": [
+            {
+                "id": r.id,
+                "matcher_name": r.matcher_name,
+                "matcher_version": r.matcher_version,
+                "summary_metrics": getattr(r, "metrics", None) or (json.loads(r.metrics_json) if r.metrics_json else {}),
+                "run_at": r.run_at.isoformat() if r.run_at else None,
+            }
+            for r in runs[:5]
+        ],
+        "recent_exceptions": open_exceptions_list[:10],
+        "recent_investigations": [
+            {
+                "id": i.id,
+                "target_type": i.target_type,
+                "target_id": i.target_id,
+                "status": i.status,
+                "classification": i.classification,
+                "verifier_status": i.verifier_status,
+                "created_at": i.created_at.isoformat() if i.created_at else None,
+            }
+            for i in investigations[:5]
+        ],
+    }
+
+
+@app.get("/admin/transactions", status_code=status.HTTP_200_OK)
+def list_transactions(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    record_type: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """List financial transactions with search, currency, record type, and reconciliation status filters."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+    pay_repo = PaymentRepository(session)
+
+    stmt = select(PaymentRecord).where(PaymentRecord.tenant_id == effective_tenant)
+    if currency:
+        stmt = stmt.where(PaymentRecord.currency == currency.strip().upper())
+    if search:
+        s = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                PaymentRecord.provider_payment_id.ilike(s),
+                PaymentRecord.payer_name.ilike(s),
+                PaymentRecord.payer_email.ilike(s),
+                PaymentRecord.reference.ilike(s),
+            )
+        )
+    stmt = stmt.order_by(PaymentRecord.received_at.desc())
+    all_payments = session.scalars(stmt).all()
+
+    # Pre-load refunds and reversals for the tenant
+    stmt_refs = select(RefundRecord).where(RefundRecord.tenant_id == effective_tenant)
+    all_refunds = session.scalars(stmt_refs).all()
+    refunds_by_payment: dict[str, list[RefundRecord]] = {}
+    for r in all_refunds:
+        refunds_by_payment.setdefault(r.parent_payment_id, []).append(r)
+
+    # Pre-load provider settlements
+    stmt_settlements = select(ProviderSettlementRecord).where(ProviderSettlementRecord.tenant_id == effective_tenant)
+    all_settlements = session.scalars(stmt_settlements).all()
+    settled_payment_ids = {s.payment_id for s in all_settlements if s.payment_id} | {s.provider_settlement_id for s in all_settlements}
+
+    # Pre-load ambiguous proposals
+    stmt_ambig = select(ProposalRecord).where(
+        ProposalRecord.tenant_id == effective_tenant,
+        ProposalRecord.outcome == "AMBIGUOUS",
+    )
+    ambiguous_payment_ids = {prop.payment_id for prop in session.scalars(stmt_ambig).all()}
+
+    filtered_transactions = []
+    for p in all_payments:
+        p_refunds = refunds_by_payment.get(p.id, [])
+        refund_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REFUND")
+        reversal_minor = sum(r.amount_minor for r in p_refunds if getattr(r, "record_type", "REFUND") == "REVERSAL")
+        is_settled = p.id in settled_payment_ids or p.provider_payment_id in settled_payment_ids
+        dispute_id = next((r.dispute_id for r in p_refunds if r.dispute_id), None)
+
+        if reversal_minor > 0:
+            rec_type = "REVERSAL"
+        elif refund_minor > 0:
+            rec_type = "REFUND"
+        elif is_settled:
+            rec_type = "SETTLEMENT"
+        else:
+            rec_type = "PAYMENT"
+
+        unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
+        net_minor = p.amount_minor - refund_minor - reversal_minor
+        if unapplied == 0:
+            reconciliation_status = "RECONCILED"
+        elif p.id in ambiguous_payment_ids:
+            reconciliation_status = "AMBIGUOUS"
+        elif unapplied == net_minor:
+            reconciliation_status = "UNMATCHED"
+        else:
+            reconciliation_status = "PARTIALLY_RECONCILED"
+
+        if record_type and record_type.strip().upper() != "ALL":
+            if rec_type != record_type.strip().upper():
+                continue
+
+        if status:
+            norm_s = status.strip().upper()
+            if norm_s in ("RECONCILED", "UNMATCHED", "PARTIALLY_RECONCILED", "AMBIGUOUS"):
+                if reconciliation_status != norm_s:
+                    continue
+            else:
+                if (p.status or "").upper() != norm_s:
+                    continue
+
+        allocated_amount = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
+        filtered_transactions.append({
+            "id": p.id,
+            "provider": p.provider,
+            "provider_payment_id": p.provider_payment_id,
+            "amount_minor": p.amount_minor,
+            "currency": p.currency,
+            "status": p.status,
+            "payer_name": p.payer_name,
+            "payer_email": p.payer_email,
+            "reference": p.reference,
+            "note": p.note,
+            "received_at": p.received_at.isoformat() if p.received_at else None,
+            "unapplied_cash_minor": unapplied,
+            "allocated_minor": allocated_amount,
+            "reconciliation_status": reconciliation_status,
+            "record_type": rec_type,
+            "refund_amount_minor": refund_minor,
+            "reversal_amount_minor": reversal_minor,
+            "net_amount_minor": p.amount_minor - refund_minor - reversal_minor,
+            "dispute_id": dispute_id,
+        })
+
+    paginated = filtered_transactions[offset : offset + limit]
+    return {
+        "transactions": paginated,
+        "total_count": len(filtered_transactions),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/admin/transactions/{payment_id}", status_code=status.HTTP_200_OK)
+def get_transaction(
+    payment_id: str,
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve complete transaction details, linked allocations, proposals, investigations and audit trail."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+    pay_repo = PaymentRepository(session)
+
+    stmt = select(PaymentRecord).where(
+        PaymentRecord.tenant_id == effective_tenant,
+        or_(
+            PaymentRecord.id == payment_id,
+            PaymentRecord.provider_payment_id == payment_id,
+        ),
+    )
+    p = session.scalars(stmt).first()
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transaction '{payment_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
+
+    # Allocations
+    stmt_alloc = select(AllocationRecord).where(
+        AllocationRecord.tenant_id == effective_tenant,
+        AllocationRecord.payment_id == p.id,
+    )
+    allocs = session.scalars(stmt_alloc).all()
+    alloc_list = []
+    for a in allocs:
+        inv = session.get(InvoiceRecord, a.invoice_id)
+        alloc_list.append({
+            "id": a.id,
+            "invoice_id": a.invoice_id,
+            "invoice_number": inv.invoice_number if inv else a.invoice_id,
+            "customer_name": inv.customer_name if inv else "",
+            "amount_minor": a.amount_minor,
+            "currency": a.currency,
+            "actor": a.actor,
+            "allocated_at": a.allocated_at.isoformat() if a.allocated_at else None,
+        })
+
+    # Settlements
+    stmt_sett = select(ProviderSettlementRecord).where(
+        ProviderSettlementRecord.tenant_id == effective_tenant,
+        or_(
+            ProviderSettlementRecord.payment_id == p.id,
+            ProviderSettlementRecord.provider_settlement_id == p.provider_payment_id,
+        ),
+    )
+    settlements = session.scalars(stmt_sett).all()
+    sett_list = []
+    for s in settlements:
+        inv = session.get(InvoiceRecord, s.invoice_id)
+        sett_list.append({
+            "id": s.id,
+            "provider_settlement_id": s.provider_settlement_id,
+            "invoice_id": s.invoice_id,
+            "invoice_number": inv.invoice_number if inv else s.invoice_id,
+            "amount_minor": s.amount_minor,
+            "currency": s.currency,
+            "settled_at": s.settled_at.isoformat() if s.settled_at else None,
+        })
+
+    # Refunds & Reversals
+    stmt_ref = select(RefundRecord).where(
+        RefundRecord.tenant_id == effective_tenant,
+        RefundRecord.parent_payment_id == p.id,
+    )
+    refunds = session.scalars(stmt_ref).all()
+    ref_list = [
+        {
+            "id": r.id,
+            "provider_refund_id": r.provider_refund_id,
+            "amount_minor": r.amount_minor,
+            "currency": r.currency,
+            "status": r.status,
+            "record_type": getattr(r, "record_type", "REFUND"),
+            "refunded_at": r.refunded_at.isoformat() if r.refunded_at else None,
+        }
+        for r in refunds
+    ]
+
+    # Proposals
+    prop_repo = ProposalRepository(session)
+    proposals = prop_repo.list_by_payment(effective_tenant, p.id)
+    prop_list = []
+    for prop in proposals:
+        decs = prop.decisions
+        dec_status = decs[-1].decision_type if decs else "PENDING"
+        pallocs = []
+        for pa in prop.allocations:
+            inv = session.get(InvoiceRecord, pa.invoice_id)
+            pallocs.append({
+                "invoice_id": pa.invoice_id,
+                "invoice_number": inv.invoice_number if inv else pa.invoice_id,
+                "amount_minor": pa.amount_minor,
+                "currency": pa.currency,
+            })
+        prop_list.append({
+            "id": prop.id,
+            "run_id": prop.run_id,
+            "outcome": prop.outcome,
+            "verifier_status": prop.verifier_status,
+            "decision_status": dec_status,
+            "allocations": pallocs,
+            "excess_amount_minor": prop.excess_amount_minor,
+            "created_at": prop.created_at.isoformat() if prop.created_at else None,
+        })
+
+    # Investigations
+    stmt_invg = select(InvestigationRecord).where(
+        InvestigationRecord.tenant_id == effective_tenant,
+        or_(
+            InvestigationRecord.target_id == p.provider_payment_id,
+            InvestigationRecord.target_id == p.id,
+        ),
+    )
+    invgs = session.scalars(stmt_invg).all()
+    invg_list = [
+        {
+            "id": i.id,
+            "status": i.status,
+            "classification": i.classification,
+            "summary": i.summary,
+            "verifier_status": i.verifier_status,
+            "created_at": i.created_at.isoformat() if i.created_at else None,
+        }
+        for i in invgs
+    ]
+
+    # Audit Events
+    stmt_aud = select(AuditEventRecord).where(
+        AuditEventRecord.tenant_id == effective_tenant,
+        or_(
+            AuditEventRecord.subject_id == p.id,
+            AuditEventRecord.subject_id == p.provider_payment_id,
+        ),
+    ).order_by(AuditEventRecord.sequence_number.desc())
+    audit_events = session.scalars(stmt_aud).all()
+    aud_list = [
+        {
+            "sequence_number": a.sequence_number,
+            "event_type": a.event_type,
+            "actor": a.actor,
+            "timestamp": a.timestamp.isoformat() if a.timestamp else None,
+            "event_hash": a.event_hash,
+        }
+        for a in audit_events
+    ]
+
+    refund_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REFUND")
+    reversal_minor = sum(r["amount_minor"] for r in ref_list if r.get("record_type") == "REVERSAL")
+    dispute_id = next((r.get("dispute_id") for r in ref_list if r.get("dispute_id")), None)
+    is_settled = len(sett_list) > 0
+
+    if reversal_minor > 0:
+        rec_type = "REVERSAL"
+    elif refund_minor > 0:
+        rec_type = "REFUND"
+    elif is_settled:
+        rec_type = "SETTLEMENT"
+    else:
+        rec_type = "PAYMENT"
+
+    net_minor = p.amount_minor - refund_minor - reversal_minor
+    has_ambiguity = any(pr.get("outcome") == "AMBIGUOUS" for pr in prop_list)
+    if unapplied == 0:
+        reconciliation_status = "RECONCILED"
+    elif has_ambiguity:
+        reconciliation_status = "AMBIGUOUS"
+    elif unapplied == net_minor:
+        reconciliation_status = "UNMATCHED"
+    else:
+        reconciliation_status = "PARTIALLY_RECONCILED"
+
+    allocated_amount = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
+
+    return {
+        "id": p.id,
+        "provider": p.provider,
+        "provider_payment_id": p.provider_payment_id,
+        "amount_minor": p.amount_minor,
+        "currency": p.currency,
+        "status": p.status,
+        "payer_name": p.payer_name,
+        "payer_email": p.payer_email,
+        "reference": p.reference,
+        "note": p.note,
+        "received_at": p.received_at.isoformat() if p.received_at else None,
+        "unapplied_cash_minor": unapplied,
+        "allocated_minor": allocated_amount,
+        "reconciliation_status": reconciliation_status,
+        "record_type": rec_type,
+        "refund_amount_minor": refund_minor,
+        "reversal_amount_minor": reversal_minor,
+        "net_amount_minor": p.amount_minor - refund_minor - reversal_minor,
+        "dispute_id": dispute_id,
+        "allocations": alloc_list,
+        "settlements": sett_list,
+        "refunds": ref_list,
+        "proposals": prop_list,
+        "investigations": invg_list,
+        "audit_events": aud_list,
+    }
+
+
+@app.get("/admin/invoices", status_code=status.HTTP_200_OK)
+def list_invoices(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    currency: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """List invoices with outstanding balances calculated from application and provider records."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+    inv_repo = InvoiceRepository(session)
+
+    stmt = select(InvoiceRecord).where(InvoiceRecord.tenant_id == effective_tenant)
+    if currency:
+        stmt = stmt.where(InvoiceRecord.currency == currency.strip().upper())
+    if search:
+        s = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                InvoiceRecord.provider_invoice_id.ilike(s),
+                InvoiceRecord.invoice_number.ilike(s),
+                InvoiceRecord.customer_name.ilike(s),
+                InvoiceRecord.customer_email.ilike(s),
+            )
+        )
+    stmt = stmt.order_by(InvoiceRecord.issued_on.desc())
+    all_invoices = session.scalars(stmt).all()
+
+    invoice_list = []
+    for inv in all_invoices:
+        allocated = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
+        settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
+        returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
+        net_applied = max(0, (allocated + settled) - returns)
+
+        if outstanding == 0:
+            reconciliation_status = "FULLY_RECONCILED"
+        elif net_applied > 0:
+            reconciliation_status = "PARTIAL"
+        else:
+            reconciliation_status = "OPEN"
+
+        if status:
+            norm_s = status.strip().upper()
+            if norm_s in ("FULLY_RECONCILED", "OPEN", "PARTIAL"):
+                if reconciliation_status != norm_s:
+                    continue
+            else:
+                if (inv.status or "").upper() != norm_s:
+                    continue
+
+        invoice_list.append({
+            "id": inv.id,
+            "provider": inv.provider,
+            "provider_invoice_id": inv.provider_invoice_id,
+            "invoice_number": inv.invoice_number,
+            "total_minor": inv.total_minor,
+            "currency": inv.currency,
+            "provider_due_minor": inv.provider_due_minor,
+            "status": inv.status,
+            "customer_name": inv.customer_name,
+            "customer_email": inv.customer_email,
+            "issued_on": inv.issued_on.isoformat() if inv.issued_on else None,
+            "due_on": inv.due_on.isoformat() if inv.due_on else None,
+            "memo": inv.memo,
+            "allocated_minor": allocated,
+            "settled_minor": settled,
+            "refunded_minor": returns,
+            "net_applied_minor": net_applied,
+            "outstanding_balance_minor": outstanding,
+            "reconciliation_status": reconciliation_status,
+        })
+
+    paginated = invoice_list[offset : offset + limit]
+    return {
+        "invoices": paginated,
+        "total_count": len(invoice_list),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/admin/invoices/{invoice_id}", status_code=status.HTTP_200_OK)
+def get_invoice(
+    invoice_id: str,
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve invoice details, ledger allocations, provider settlements and outstanding balance."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+    inv_repo = InvoiceRepository(session)
+
+    stmt = select(InvoiceRecord).where(
+        InvoiceRecord.tenant_id == effective_tenant,
+        or_(
+            InvoiceRecord.id == invoice_id,
+            InvoiceRecord.provider_invoice_id == invoice_id,
+            InvoiceRecord.invoice_number == invoice_id,
+        ),
+    )
+    inv = session.scalars(stmt).first()
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice '{invoice_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    allocated = inv_repo.get_total_allocated_minor(effective_tenant, inv.id)
+    settled = inv_repo.get_total_settled_minor(effective_tenant, inv.id)
+    returns = inv_repo.get_total_returns_minor(effective_tenant, inv.id)
+    outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv.id)
+    net_applied = max(0, (allocated + settled) - returns)
+
+    if outstanding == 0:
+        reconciliation_status = "FULLY_RECONCILED"
+    elif net_applied > 0:
+        reconciliation_status = "PARTIAL"
+    else:
+        reconciliation_status = "OPEN"
+
+    # Allocations against this invoice
+    stmt_alloc = select(AllocationRecord).where(
+        AllocationRecord.tenant_id == effective_tenant,
+        AllocationRecord.invoice_id == inv.id,
+    )
+    allocs = session.scalars(stmt_alloc).all()
+    alloc_list = []
+    for a in allocs:
+        p = session.get(PaymentRecord, a.payment_id)
+        alloc_list.append({
+            "id": a.id,
+            "payment_id": a.payment_id,
+            "provider_payment_id": p.provider_payment_id if p else a.payment_id,
+            "payer_name": p.payer_name if p else "",
+            "amount_minor": a.amount_minor,
+            "currency": a.currency,
+            "actor": a.actor,
+            "allocated_at": a.allocated_at.isoformat() if a.allocated_at else None,
+        })
+
+    # Settlements against this invoice
+    stmt_sett = select(ProviderSettlementRecord).where(
+        ProviderSettlementRecord.tenant_id == effective_tenant,
+        ProviderSettlementRecord.invoice_id == inv.id,
+    )
+    settlements = session.scalars(stmt_sett).all()
+    sett_list = [
+        {
+            "id": s.id,
+            "provider_settlement_id": s.provider_settlement_id,
+            "amount_minor": s.amount_minor,
+            "currency": s.currency,
+            "settled_at": s.settled_at.isoformat() if s.settled_at else None,
+        }
+        for s in settlements
+    ]
+
+    # Refunds & Reversals against this invoice or its allocations
+    alloc_ids = [a.id for a in allocs]
+    sett_ids = [s.id for s in settlements]
+    ref_conditions = [RefundRecord.invoice_id == inv.id]
+    if alloc_ids:
+        ref_conditions.append(RefundRecord.allocation_id.in_(alloc_ids))
+    if sett_ids:
+        ref_conditions.append(RefundRecord.settlement_id.in_(sett_ids))
+    linked_pays = [a.payment_id for a in allocs] + [s.payment_id for s in settlements if s.payment_id]
+    if linked_pays:
+        ref_conditions.append(RefundRecord.parent_payment_id.in_(linked_pays))
+
+    stmt_ref = select(RefundRecord).where(
+        RefundRecord.tenant_id == effective_tenant,
+        RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
+        or_(*ref_conditions),
+    )
+    refunds = session.scalars(stmt_ref).all()
+    ref_list = [
+        {
+            "id": r.id,
+            "provider_refund_id": r.provider_refund_id,
+            "parent_payment_id": r.parent_payment_id,
+            "amount_minor": r.amount_minor,
+            "currency": r.currency,
+            "status": r.status,
+            "record_type": getattr(r, "record_type", "REFUND"),
+            "refunded_at": r.refunded_at.isoformat() if r.refunded_at else None,
+        }
+        for r in refunds
+    ]
+
+    return {
+        "id": inv.id,
+        "provider": inv.provider,
+        "provider_invoice_id": inv.provider_invoice_id,
+        "invoice_number": inv.invoice_number,
+        "total_minor": inv.total_minor,
+        "currency": inv.currency,
+        "provider_due_minor": inv.provider_due_minor,
+        "status": inv.status,
+        "customer_name": inv.customer_name,
+        "customer_email": inv.customer_email,
+        "issued_on": inv.issued_on.isoformat() if inv.issued_on else None,
+        "due_on": inv.due_on.isoformat() if inv.due_on else None,
+        "memo": inv.memo,
+        "allocated_minor": allocated,
+        "settled_minor": settled,
+        "refunded_minor": returns,
+        "net_applied_minor": net_applied,
+        "outstanding_balance_minor": outstanding,
+        "reconciliation_status": reconciliation_status,
+        "allocations": alloc_list,
+        "settlements": sett_list,
+        "refunds": ref_list,
+    }
+
+
+@app.post("/admin/runs", status_code=status.HTTP_200_OK)
+def trigger_reconciliation_run(
+    request: RunTriggerRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Execute deterministic reconciliation run and persist proposed match outcomes."""
+    config = APIConfig.from_env()
+    effective_tenant = request.tenant_id or config.default_tenant_id
+
+    tenant_repo = TenantRepository(session)
+    if not tenant_repo.get_tenant(effective_tenant):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tenant '{effective_tenant}' not found.",
+        )
+
+    workflow = StorageWorkflow(session)
+    run_rec, run_result = workflow.run_reconciliation(
+        tenant_id=effective_tenant,
+        matcher_name=request.matcher_name or "deterministic_v2",
+        matcher_version=request.matcher_version or "2.0.0",
+    )
+    session.commit()
+
+    return {
+        "status": "completed",
+        "run_id": run_rec.id,
+        "tenant_id": effective_tenant,
+        "matcher_name": run_rec.matcher_name,
+        "matcher_version": run_rec.matcher_version,
+        "proposals_generated": len(run_result.proposals),
+        "metrics": run_rec.metrics,
+        "run_at": run_rec.run_at.isoformat() if run_rec.run_at else None,
+    }
+
+
+def _enrich_proposal_payload(
+    session: Session,
+    effective_tenant: str,
+    p: ProposalRecord,
+    pay: Optional[PaymentRecord],
+    inv_repo: InvoiceRepository,
+) -> tuple[list[str], Optional[dict[str, Any]], ProposalSafetyEvaluation]:
+    evidence: list[str] = json.loads(p.evidence_json) if p.evidence_json else []
+    ambiguity_cert = json.loads(p.ambiguity_certificate_json) if p.ambiguity_certificate_json else None
+
+    # Evaluate linked investigation safety gate
+    safety_eval = evaluate_proposal_investigation_safety(
+        session=session,
+        tenant_id=effective_tenant,
+        proposal=p,
+        payment=pay,
+        proposed_allocs=p.allocations,
+    )
+
+    # Surface authoritative investigation alerts in evidence
+    if safety_eval.effective_verifier_status == "INVALID":
+        crit_msg = f"[CRITICAL] {safety_eval.approval_prohibited_reason}"
+        if crit_msg not in evidence and not any("prompt injection" in str(e).lower() for e in evidence):
+            evidence.insert(0, crit_msg)
+    elif safety_eval.effective_verifier_status == "NEEDS_REVIEW" and not safety_eval.approval_eligible:
+        warn_msg = f"[UNRESOLVED CONFLICT] {safety_eval.approval_prohibited_reason}"
+        if warn_msg not in evidence and not any("unresolved customer mismatch" in str(e).lower() or "[unresolved conflict]" in str(e).lower() for e in evidence):
+            evidence.insert(0, warn_msg)
+
+    # Currency mismatch detection & authoritative explanation
+    if pay and pay.reference:
+        target_inv = session.scalars(select(InvoiceRecord).where(
+            InvoiceRecord.tenant_id == effective_tenant,
+            or_(
+                InvoiceRecord.provider_invoice_id == pay.reference,
+                InvoiceRecord.invoice_number == pay.reference,
+            ),
+        )).first()
+        if target_inv and target_inv.currency != pay.currency:
+            mismatch_msg = (
+                f"Currency Mismatch: Remittance in {pay.currency} cannot be matched to "
+                f"{target_inv.currency} invoice {target_inv.invoice_number}. "
+                f"Strict currency isolation prevents cross-currency allocations."
+            )
+            if mismatch_msg not in evidence:
+                evidence.append(mismatch_msg)
+
+    # Multi-candidate ambiguity certificate candidate enrichment
+    if ambiguity_cert and "candidate_invoice_ids" in ambiguity_cert:
+        cand_details = []
+        for cid in ambiguity_cert.get("candidate_invoice_ids", []):
+            cinv = session.scalars(select(InvoiceRecord).where(
+                InvoiceRecord.tenant_id == effective_tenant,
+                or_(
+                    InvoiceRecord.id == cid,
+                    InvoiceRecord.provider_invoice_id == cid,
+                    InvoiceRecord.invoice_number == cid,
+                ),
+            )).first()
+            if cinv:
+                cinv_alloc = inv_repo.get_total_allocated_minor(effective_tenant, cinv.id)
+                cinv_sett = inv_repo.get_total_settled_minor(effective_tenant, cinv.id)
+                cand_details.append({
+                    "id": cinv.id,
+                    "invoice_number": cinv.invoice_number,
+                    "provider_invoice_id": cinv.provider_invoice_id,
+                    "customer_name": cinv.customer_name,
+                    "customer_email": cinv.customer_email,
+                    "total_minor": cinv.total_minor,
+                    "currency": cinv.currency,
+                    "outstanding_minor": max(0, cinv.total_minor - (cinv_alloc + cinv_sett)),
+                    "score": ambiguity_cert.get("candidate_scores", {}).get(cid, 0),
+                    "memo": cinv.memo,
+                })
+        ambiguity_cert["candidates_detail"] = cand_details
+
+    # Split allocation explanation
+    if len(p.allocations) > 1:
+        split_msg = "Split Allocation: Remittance aggregate amount satisfies multiple invoices."
+        if split_msg not in evidence and not any("split allocation:" in str(e).lower() for e in evidence):
+            evidence.append(split_msg)
+    elif p.outcome == "PROPOSED" and len(p.allocations) == 1:
+        exact_msg = "Exact Match: Remittance reference and amount corroborate open invoice."
+        if exact_msg not in evidence and not any("exact match:" in str(e).lower() for e in evidence):
+            evidence.append(exact_msg)
+
+    return evidence, ambiguity_cert, safety_eval
+
+
+@app.get("/admin/runs/{run_id}", status_code=status.HTTP_200_OK)
+def get_run(
+    run_id: str,
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve full details of a reconciliation run and its generated proposals."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    run_repo = ReconciliationRunRepository(session)
+    prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
+    run = run_repo.get_run(effective_tenant, run_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Reconciliation run '{run_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    proposals = prop_repo.list_by_run(effective_tenant, run_id)
+    proposals_list = []
+    for p in proposals:
+        decs = p.decisions
+        dec_status = decs[-1].decision_type if decs else "PENDING"
+        pay = session.get(PaymentRecord, p.payment_id)
+        allocs = []
+        for pa in p.allocations:
+            inv = session.get(InvoiceRecord, pa.invoice_id)
+            allocs.append({
+                "invoice_id": pa.invoice_id,
+                "invoice_number": inv.invoice_number if inv else pa.invoice_id,
+                "amount_minor": pa.amount_minor,
+                "currency": pa.currency,
+            })
+        ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+        proposals_list.append({
+            "id": p.id,
+            "payment_id": p.payment_id,
+            "provider_payment_id": pay.provider_payment_id if pay else p.payment_id,
+            "payer_name": pay.payer_name if pay else "",
+            "payment_amount_minor": pay.amount_minor if pay else 0,
+            "payment_currency": pay.currency if pay else "USD",
+            "outcome": p.outcome,
+            "verifier_status": safety_eval.effective_verifier_status,
+            "approval_eligible": safety_eval.approval_eligible,
+            "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+            "linked_investigation": safety_eval.linked_investigation,
+            "decision_status": dec_status,
+            "allocations": allocs,
+            "excess_amount_minor": p.excess_amount_minor,
+            "evidence": ev,
+            "ambiguity_certificate": ambig,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        })
+
+    return {
+        "id": run.id,
+        "tenant_id": run.tenant_id,
+        "matcher_name": run.matcher_name,
+        "matcher_version": run.matcher_version,
+        "status": run.status,
+        "metrics": run.metrics,
+        "run_at": run.run_at.isoformat() if run.run_at else None,
+        "proposals": proposals_list,
+        "total_proposals": len(proposals_list),
+    }
+
+
+@app.get("/admin/proposals", status_code=status.HTTP_200_OK)
+def list_proposals(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    run_id: Optional[str] = None,
+    payment_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """List match proposals pending or resolved by operators."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
+    proposals = prop_repo.list_proposals(
+        tenant_id=effective_tenant,
+        status=status,
+        run_id=run_id,
+        payment_id=payment_id,
+        limit=limit,
+        offset=offset,
+    )
+
+    items = []
+    for p in proposals:
+        decs = p.decisions
+        dec_status = decs[-1].decision_type if decs else "PENDING"
+        pay = session.get(PaymentRecord, p.payment_id)
+        allocs = []
+        for pa in p.allocations:
+            inv = session.get(InvoiceRecord, pa.invoice_id)
+            allocs.append({
+                "invoice_id": pa.invoice_id,
+                "invoice_number": inv.invoice_number if inv else pa.invoice_id,
+                "amount_minor": pa.amount_minor,
+                "currency": pa.currency,
+            })
+        ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+        items.append({
+            "id": p.id,
+            "run_id": p.run_id,
+            "payment_id": p.payment_id,
+            "provider_payment_id": pay.provider_payment_id if pay else p.payment_id,
+            "payer_name": pay.payer_name if pay else "",
+            "payment_amount_minor": pay.amount_minor if pay else 0,
+            "payment_currency": pay.currency if pay else "USD",
+            "outcome": p.outcome,
+            "verifier_status": safety_eval.effective_verifier_status,
+            "approval_eligible": safety_eval.approval_eligible,
+            "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+            "linked_investigation": safety_eval.linked_investigation,
+            "decision_status": dec_status,
+            "allocations": allocs,
+            "excess_amount_minor": p.excess_amount_minor,
+            "evidence": ev,
+            "ambiguity_certificate": ambig,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        })
+
+    return {
+        "proposals": items,
+        "total_count": len(items),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/admin/proposals/{proposal_id}", status_code=status.HTTP_200_OK)
+def get_proposal(
+    proposal_id: str,
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve full proposal record, independent verification checks, and decision history."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    prop_repo = ProposalRepository(session)
+    inv_repo = InvoiceRepository(session)
+    p = prop_repo.get_proposal(effective_tenant, proposal_id)
+    if not p:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Proposal '{proposal_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    decs = p.decisions
+    dec_status = decs[-1].decision_type if decs else "PENDING"
+    pay = session.get(PaymentRecord, p.payment_id)
+
+    allocs = []
+    for pa in p.allocations:
+        inv = session.get(InvoiceRecord, pa.invoice_id)
+        allocs.append({
+            "id": pa.id,
+            "invoice_id": pa.invoice_id,
+            "invoice_number": inv.invoice_number if inv else pa.invoice_id,
+            "customer_name": inv.customer_name if inv else "",
+            "amount_minor": pa.amount_minor,
+            "currency": pa.currency,
+        })
+
+    ver_repo = VerificationRepository(session)
+    verifications = ver_repo.list_by_proposal(effective_tenant, proposal_id)
+    ver_list = [
+        {
+            "id": v.id,
+            "check_name": v.check_name,
+            "passed": v.passed,
+            "failure_reason": v.failure_reason,
+            "verified_at": v.verified_at.isoformat() if v.verified_at else None,
+        }
+        for v in verifications
+    ]
+
+    dec_list = [
+        {
+            "id": d.id,
+            "decision_type": d.decision_type,
+            "actor": d.actor,
+            "reason": d.reason,
+            "decided_at": d.decided_at.isoformat() if d.decided_at else None,
+        }
+        for d in decs
+    ]
+
+    ev, ambig, safety_eval = _enrich_proposal_payload(session, effective_tenant, p, pay, inv_repo)
+
+    return {
+        "id": p.id,
+        "tenant_id": p.tenant_id,
+        "run_id": p.run_id,
+        "payment_id": p.payment_id,
+        "provider_payment_id": pay.provider_payment_id if pay else p.payment_id,
+        "payer_name": pay.payer_name if pay else "",
+        "payment_amount_minor": pay.amount_minor if pay else 0,
+        "payment_currency": pay.currency if pay else "USD",
+        "outcome": p.outcome,
+        "verifier_status": safety_eval.effective_verifier_status,
+        "approval_eligible": safety_eval.approval_eligible,
+        "approval_prohibited_reason": safety_eval.approval_prohibited_reason,
+        "linked_investigation": safety_eval.linked_investigation,
+        "decision_status": dec_status,
+        "allocations": allocs,
+        "verifications": ver_list,
+        "decisions": dec_list,
+        "excess_amount_minor": p.excess_amount_minor,
+        "evidence": ev,
+        "ambiguity_certificate": ambig,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@app.post("/admin/proposals/{proposal_id}/approve", status_code=status.HTTP_200_OK)
+def approve_proposal(
+    proposal_id: str,
+    request: ProposalApproveRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Approve a reconciliation proposal via the 10-step atomic financial transaction."""
+    config = APIConfig.from_env()
+    effective_tenant = request.tenant_id or config.default_tenant_id
+
+    approval_service = ApprovalService(session)
+    idempotency_key = f"approval:{effective_tenant}:{proposal_id}:{request.reviewer}"
+
+    try:
+        res = approval_service.approve_proposal(
+            tenant_id=effective_tenant,
+            proposal_id=proposal_id,
+            actor=request.reviewer,
+            idempotency_key=idempotency_key,
+            reason=request.notes or "Manual operator approval",
+        )
+    except VerificationFailedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Proposal approval rejected by independent safety verifier: {exc}",
+        ) from exc
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except (IneligiblePaymentError, IneligibleInvoiceError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except (ConflictError, StaleVersionError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "status": "APPROVED",
+        "decision_id": res.decision_id,
+        "proposal_id": res.proposal_id,
+        "allocation_ids": list(res.allocation_ids),
+        "audit_event_id": res.audit_event_id,
+        "is_idempotent_replay": res.is_idempotent_replay,
+    }
+
+
+@app.post("/admin/proposals/{proposal_id}/reject", status_code=status.HTTP_200_OK)
+def reject_proposal(
+    proposal_id: str,
+    request: ProposalRejectRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Record operator rejection of a proposed reconciliation."""
+    config = APIConfig.from_env()
+    effective_tenant = request.tenant_id or config.default_tenant_id
+
+    approval_service = ApprovalService(session)
+    idempotency_key = f"rejection:{effective_tenant}:{proposal_id}:{request.reviewer}"
+
+    try:
+        dec = approval_service.reject_proposal(
+            tenant_id=effective_tenant,
+            proposal_id=proposal_id,
+            actor=request.reviewer,
+            idempotency_key=idempotency_key,
+            reason=request.reason,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "status": "REJECTED",
+        "decision_id": dec.id,
+        "proposal_id": proposal_id,
+        "reason": dec.reason,
+    }
+
+
+@app.post("/admin/investigations/{investigation_id}/approve", status_code=status.HTTP_200_OK)
+def approve_investigation(
+    investigation_id: str,
+    request: InvestigationDecisionRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Approve an investigation recommendation.
+
+    NON-NEGOTIABLE FINANCIAL SAFETY INVARIANTS:
+    1. Investigation Eligibility & Independent Verifier Semantics:
+       - Reject if already resolved (APPROVED or REJECTED).
+       - Must be in completed human-review state ('NEEDS_REVIEW' or 'COMPLETED').
+       - Independent safety verifier status must explicitly be 'VERIFIED' or 'NEEDS_REVIEW'.
+       - verifier_details.passed must explicitly be True.
+       - All 7 required checked_invariants must explicitly be True.
+       - verifier_details.issues must be empty.
+       - INVALID, UNVERIFIED, NOT_VERIFIED, missing details, passed=False, or failed invariants strictly rejected (fail-closed).
+       - Blocking risk flags (prompt injection, currency mismatch, contradictory provider record, etc.) strictly prevent approval.
+       - Unresolved contradictory financial evidence strictly prevents approval.
+    2. Proposal Linkage:
+       - Prefer approving an existing deterministic proposal explicitly linked to the target payment.
+       - Proposal must still be pending.
+       - Proposal must belong to the payment being investigated.
+       - Proposal allocations must match the recommended allocation distribution.
+       - Never synthesize financial evidence or fabricate synthetic proposals with fake evidence.
+       - If no existing deterministic proposal matches, keep as recommendation requiring further review.
+    3. Allocation Correctness:
+       - Never fall back to full payment amount when suggested_amount_cents is absent or zero.
+       - Reject missing, zero, or negative allocation amounts.
+       - Respect complete suggested_allocations mapping for split payments.
+       - Validate sum of allocation amounts <= payment amount and <= unapplied cash.
+       - Validate each target invoice independently for eligibility, currency match, and capacity.
+    4. Human Approval Execution:
+       - All financial mutations MUST proceed through ApprovalService within an atomic transaction.
+    """
+    config = APIConfig.from_env()
+    effective_tenant = request.tenant_id or config.default_tenant_id
+
+    invg_repo = InvestigationRepository(session)
+    inv = invg_repo.get_investigation(effective_tenant, investigation_id)
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    # 1. Eligibility Checks & Verifier Semantics
+    # Independent safety verifier status must explicitly be VERIFIED or NEEDS_REVIEW with passed=True
+    norm_verifier_status = (inv.verifier_status or "").upper()
+    if norm_verifier_status == "INVALID":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Cannot approve investigation: Independent safety verifier status is 'INVALID'. "
+                "Financial mutation is strictly blocked (fail-closed)."
+            ),
+        )
+    if norm_verifier_status in ("UNVERIFIED", "NOT_VERIFIED", ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status or 'UNVERIFIED'}'. "
+                "Unverified investigations cannot be approved (fail-closed)."
+            ),
+        )
+    if norm_verifier_status not in ("VERIFIED", "NEEDS_REVIEW"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation: Independent safety verifier status is '{inv.verifier_status}'. "
+                "Only 'VERIFIED' or 'NEEDS_REVIEW' investigations with passed safety checks are eligible (fail-closed)."
+            ),
+        )
+
+    # Verifier details, issues, and invariant checks (Requirements C, D, E)
+    v_details = inv.verifier_details
+    if not v_details or not isinstance(v_details, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Missing or malformed verifier details (fail-closed).",
+        )
+
+    if v_details.get("passed") is not True:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Independent safety verifier 'passed' check is not True (fail-closed).",
+        )
+
+    issues = v_details.get("issues")
+    if issues and len(issues) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Independent safety verifier reported issues: {issues} (fail-closed).",
+        )
+
+    REQUIRED_VERIFIER_INVARIANTS = {
+        "tenant_isolation",
+        "target_entity_exists",
+        "evidence_references_authentic",
+        "facts_strictly_grounded",
+        "financial_capacity_safe",
+        "settlement_allocation_distinction",
+        "no_autonomous_financial_mutation",
+    }
+    checked_invariants = v_details.get("checked_invariants")
+    if not isinstance(checked_invariants, dict) or not checked_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: Verifier checked invariants are missing (fail-closed).",
+        )
+
+    missing_invariants = REQUIRED_VERIFIER_INVARIANTS - set(checked_invariants.keys())
+    if missing_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Missing required safety invariants: {sorted(missing_invariants)} (fail-closed).",
+        )
+
+    failed_invariants = [k for k, v in checked_invariants.items() if v is not True]
+    if failed_invariants:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Safety invariants failed: {failed_invariants} (fail-closed).",
+        )
+
+    # Investigation Lifecycle Status (Requirement A)
+    if inv.status in ("APPROVED", "REJECTED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation '{investigation_id}': Already resolved with status '{inv.status}'.",
+        )
+
+    if inv.status not in ("NEEDS_REVIEW", "COMPLETED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot approve investigation '{investigation_id}': Incomplete or ineligible status '{inv.status}'. "
+                "Only investigations in 'NEEDS_REVIEW' or 'COMPLETED' state can be reviewed and approved."
+            ),
+        )
+
+    # 2. Extract and Validate Suggested Resolution & Risk Checks (Requirements F, G)
+    result_dict = inv.result or {}
+
+    classification = (result_dict.get("classification") or inv.classification or "").upper()
+    if classification in ("PROMPT_INJECTION_SUSPECT", "CURRENCY_MISMATCH"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Exception classification '{classification}' is blocking.",
+        )
+
+    risk_flags = result_dict.get("risk_flags") or []
+    if isinstance(risk_flags, list):
+        BLOCKING_RISK_PATTERNS = (
+            "INJECTION",
+            "CURRENCY_MISMATCH",
+            "CONTRADICT",
+            "REVERSAL",
+            "DISPUTE",
+            "REJECTED",
+            "MALFORMED",
+            "SCHEMA_VALIDATION",
+        )
+        for rf in risk_flags:
+            norm_rf = str(rf).strip().upper()
+            if any(pat in norm_rf for pat in BLOCKING_RISK_PATTERNS):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot approve investigation: Blocking risk flag detected: '{rf}'.",
+                )
+
+    conflicting_ev = result_dict.get("conflicting_evidence") or []
+    if conflicting_ev and len(conflicting_ev) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot approve investigation: Unresolved contradictory financial evidence present ({len(conflicting_ev)} conflict(s)).",
+        )
+
+    suggested_res = result_dict.get("suggested_resolution")
+    if not suggested_res:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot approve investigation: No suggested resolution is present in the investigation result.",
+        )
+
+    res_type = suggested_res.get("resolution_type")
+    if res_type != "ALLOCATE_PAYMENT":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Suggested resolution type '{res_type}' cannot be approved as an allocation.",
+        )
+
+    # Resolve target payment
+    stmt_pay = select(PaymentRecord).where(
+        PaymentRecord.tenant_id == effective_tenant,
+        or_(
+            PaymentRecord.id == inv.target_id,
+            PaymentRecord.provider_payment_id == inv.target_id,
+        ),
+    )
+    pay = session.scalars(stmt_pay).first()
+    if not pay:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Investigation target payment '{inv.target_id}' could not be resolved in ledger.",
+        )
+
+    norm_pay_status = (pay.status or "").upper()
+    if norm_pay_status not in {"COMPLETED", "SUCCESS", "S"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment status '{pay.status}' is not eligible for allocation (must be COMPLETED).",
+        )
+
+    # Validate suggested allocation amounts - never fall back to full payment amount!
+    alloc_map = suggested_res.get("suggested_allocations")
+    suggested_amt = suggested_res.get("suggested_amount_cents")
+    suggested_invoices = suggested_res.get("suggested_invoice_ids") or []
+
+    if alloc_map and isinstance(alloc_map, dict) and len(alloc_map) > 0:
+        raw_allocs = dict(alloc_map)
+    elif len(suggested_invoices) == 1:
+        if suggested_amt is None or suggested_amt <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Missing or invalid suggested allocation amount: suggested_amount_cents must be a positive integer. "
+                    "Falling back to payment amount is strictly prohibited."
+                ),
+            )
+        raw_allocs = {suggested_invoices[0]: suggested_amt}
+    elif len(suggested_invoices) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Split recommendation across multiple invoices requires an explicit suggested_allocations mapping per invoice.",
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Suggested resolution specifies no target invoices.",
+        )
+
+    # Validate each individual allocation amount
+    for inv_key, amt in raw_allocs.items():
+        if not isinstance(amt, int) or amt <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid allocation amount {amt} for invoice '{inv_key}': must be a positive integer.",
+            )
+
+    total_alloc_minor = sum(raw_allocs.values())
+    if total_alloc_minor <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Total suggested allocation amount must be greater than zero.",
+        )
+    if total_alloc_minor > pay.amount_minor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sum of suggested allocations ({total_alloc_minor}) exceeds payment total ({pay.amount_minor}).",
+        )
+
+    pay_repo = PaymentRepository(session)
+    unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, pay.id)
+    if total_alloc_minor > unapplied:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Sum of suggested allocations ({total_alloc_minor}) exceeds payment unapplied cash ({unapplied}).",
+        )
+
+    # Resolve invoices and check capacity / currency independently
+    inv_repo = InvoiceRepository(session)
+    resolved_allocations: dict[str, int] = {}
+    for inv_key, amt in raw_allocs.items():
+        stmt_inv = select(InvoiceRecord).where(
+            InvoiceRecord.tenant_id == effective_tenant,
+            or_(
+                InvoiceRecord.id == inv_key,
+                InvoiceRecord.provider_invoice_id == inv_key,
+                InvoiceRecord.invoice_number == inv_key,
+            ),
+        )
+        inv_rec = session.scalars(stmt_inv).first()
+        if not inv_rec:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Suggested invoice '{inv_key}' could not be resolved in ledger.",
+            )
+
+        norm_inv_status = (inv_rec.status or "").upper()
+        if norm_inv_status in {"DRAFT", "CANCELLED", "PAID", "VOID"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invoice '{inv_rec.invoice_number}' status is '{inv_rec.status}', ineligible for allocation.",
+            )
+
+        if inv_rec.currency != pay.currency:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Currency mismatch: invoice '{inv_rec.invoice_number}' ({inv_rec.currency}) does not match payment currency ({pay.currency}).",
+            )
+
+        outstanding = inv_repo.get_ledger_outstanding_minor(effective_tenant, inv_rec.id)
+        if amt > outstanding:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Suggested allocation ({amt}) exceeds invoice '{inv_rec.invoice_number}' outstanding balance ({outstanding}).",
+            )
+        resolved_allocations[inv_rec.id] = amt
+
+    # 3. Proposal Linkage (Requirement 2B)
+    prop_repo = ProposalRepository(session)
+    existing_props = prop_repo.list_by_payment(effective_tenant, pay.id)
+
+    pending_props = [
+        p for p in existing_props
+        if p.outcome == "PROPOSED"
+        and (not p.decisions or p.decisions[-1].decision_type == "PENDING")
+    ]
+
+    target_prop: Optional[ProposalRecord] = None
+    if request.proposal_id:
+        target_prop = next((p for p in pending_props if p.id == request.proposal_id), None)
+        if not target_prop:
+            foreign_prop = session.get(ProposalRecord, request.proposal_id)
+            if foreign_prop and (foreign_prop.tenant_id != effective_tenant or foreign_prop.payment_id != pay.id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Proposal '{request.proposal_id}' belongs to a different payment or tenant.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified proposal '{request.proposal_id}' is not an eligible pending proposal for this payment.",
+            )
+        p_allocs = {pa.invoice_id: pa.amount_minor for pa in target_prop.allocations}
+        if p_allocs != resolved_allocations:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified proposal allocations {p_allocs} do not match recommendation allocations {resolved_allocations}.",
+            )
+    else:
+        matching_props = [
+            p for p in pending_props
+            if {pa.invoice_id: pa.amount_minor for pa in p.allocations} == resolved_allocations
+        ]
+        if len(matching_props) == 1:
+            target_prop = matching_props[0]
+        elif len(matching_props) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Multiple pending proposals match this recommendation. Specify proposal_id explicitly to resolve ambiguity.",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot approve recommendation: No pending deterministic proposal matches the recommended allocation "
+                    f"{resolved_allocations}. Recommendations without a matching verified deterministic proposal "
+                    f"must remain under review rather than fabricating synthetic proposals."
+                ),
+            )
+
+    if target_prop.payment_id != pay.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target proposal belongs to a different payment.",
+        )
+
+    # 4. Atomic Execution via ApprovalService (Requirement 2D)
+    approval_service = ApprovalService(session)
+    idempotency_key = f"invg-approval:{effective_tenant}:{investigation_id}:{target_prop.id}"
+    try:
+        approval_res = approval_service.approve_proposal(
+            tenant_id=effective_tenant,
+            proposal_id=target_prop.id,
+            actor=request.reviewer,
+            idempotency_key=idempotency_key,
+            reason=request.notes or f"Approved via Investigation {investigation_id}",
+        )
+        allocation_ids = list(approval_res.allocation_ids)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to execute approved allocation via ApprovalService: {exc}",
+        ) from exc
+
+    # 5. Record Investigation Resolution & Audit
+    invg_repo.update_status(effective_tenant, investigation_id, "APPROVED")
+
+    audit_repo = AuditRepository(session)
+    audit_event = audit_repo.append_event(
+        tenant_id=effective_tenant,
+        event_type="INVESTIGATION_APPROVED",
+        actor=request.reviewer,
+        subject_type="investigation",
+        subject_id=investigation_id,
+        details={
+            "investigation_id": investigation_id,
+            "proposal_id": target_prop.id,
+            "target_type": inv.target_type,
+            "target_id": inv.target_id,
+            "reviewer_identity_type": "operator_supplied_label",
+            "allocation_ids": allocation_ids,
+            "notes": request.notes or "",
+        },
+    )
+    session.commit()
+
+    return {
+        "status": "APPROVED",
+        "investigation_id": investigation_id,
+        "proposal_id": target_prop.id,
+        "allocation_ids": allocation_ids,
+        "audit_event_id": audit_event.event_id,
+    }
+
+
+@app.post("/admin/investigations/{investigation_id}/reject", status_code=status.HTTP_200_OK)
+def reject_investigation(
+    investigation_id: str,
+    request: InvestigationDecisionRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Record operator rejection of an investigation recommendation."""
+    config = APIConfig.from_env()
+    effective_tenant = request.tenant_id or config.default_tenant_id
+
+    invg_repo = InvestigationRepository(session)
+    inv = invg_repo.get_investigation(effective_tenant, investigation_id)
+    if not inv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found for tenant '{effective_tenant}'.",
+        )
+
+    if inv.status in ("APPROVED", "REJECTED"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject investigation '{investigation_id}': Already resolved with status '{inv.status}'.",
+        )
+
+    invg_repo.update_status(effective_tenant, investigation_id, "REJECTED")
+
+    audit_repo = AuditRepository(session)
+    audit_event = audit_repo.append_event(
+        tenant_id=effective_tenant,
+        event_type="INVESTIGATION_REJECTED",
+        actor=request.reviewer,
+        subject_type="investigation",
+        subject_id=investigation_id,
+        details={
+            "investigation_id": investigation_id,
+            "target_type": inv.target_type,
+            "target_id": inv.target_id,
+            "reviewer_identity_type": "operator_supplied_label",
+            "notes": request.notes or "",
+        },
+    )
+    session.commit()
+
+    return {
+        "status": "REJECTED",
+        "investigation_id": investigation_id,
+        "audit_event_id": audit_event.event_id,
+    }
+
+
+@app.get("/admin/audit-events", status_code=status.HTTP_200_OK)
+def list_audit_events(
+    tenant_id: Optional[str] = None,
+    subject_type: Optional[str] = None,
+    subject_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Retrieve immutable, tamper-evident hash-chained audit events."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    stmt = select(AuditEventRecord).where(AuditEventRecord.tenant_id == effective_tenant)
+    if subject_type:
+        stmt = stmt.where(AuditEventRecord.subject_type == subject_type)
+    if subject_id:
+        stmt = stmt.where(AuditEventRecord.subject_id == subject_id)
+    stmt = stmt.order_by(AuditEventRecord.sequence_number.desc())
+
+    all_events = session.scalars(stmt).all()
+    paginated = all_events[offset : offset + limit]
+
+    return {
+        "audit_events": [
+            {
+                "id": a.id,
+                "sequence_number": a.sequence_number,
+                "event_id": a.event_id,
+                "event_type": a.event_type,
+                "actor": a.actor,
+                "subject_type": a.subject_type,
+                "subject_id": a.subject_id,
+                "payload": json.loads(a.payload_json) if a.payload_json else {},
+                "prev_hash": a.prev_hash,
+                "event_hash": a.event_hash,
+                "timestamp": a.timestamp.isoformat() if a.timestamp else None,
+            }
+            for a in paginated
+        ],
+        "total_count": len(all_events),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/admin/audit-events/verify", status_code=status.HTTP_200_OK)
+def verify_audit_trail(
+    tenant_id: Optional[str] = None,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Cryptographically verify the tenant's SHA-256 hash-chained audit trail."""
+    config = APIConfig.from_env()
+    effective_tenant = tenant_id or config.default_tenant_id
+
+    audit_repo = AuditRepository(session)
+    events = list(audit_repo.list_events(effective_tenant))
+
+    try:
+        audit_repo.verify_tenant_chain(effective_tenant)
+        return {
+            "verified": True,
+            "tenant_id": effective_tenant,
+            "total_events": len(events),
+            "algorithm": "SHA-256",
+            "genesis_hash": GENESIS_HASH,
+            "latest_hash": events[-1].event_hash if events else GENESIS_HASH,
+            "message": "Cryptographic audit chain verified: zero tampering detected.",
+        }
+    except AuditIntegrityError as exc:
+        return {
+            "verified": False,
+            "tenant_id": effective_tenant,
+            "total_events": len(events),
+            "error": str(exc),
+            "details": list(exc.details),
+        }
+
+
+@app.post("/admin/demo/seed", status_code=status.HTTP_200_OK)
+def seed_demo_endpoint(
+    request: DemoSeedRequest,
+    _auth: str = Depends(require_admin_auth),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Idempotently seed rich, realistic demo data for operator dashboard review.
+
+    DEMO SAFETY INVARIANT:
+    Seeding is strictly restricted to the dedicated 'demo_merchant' tenant.
+    Never allow synthetic seeding into real merchant tenants.
+    """
+    tenant_id = request.tenant_id or "demo_merchant"
+    if tenant_id != "demo_merchant":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Demo data seeding is strictly restricted to the 'demo_merchant' tenant. "
+                f"Cannot seed synthetic data into target tenant '{tenant_id}'."
+            ),
+        )
+    result = seed_demo_data(session, tenant_id=tenant_id, force=request.force or False)
+    return result
+
+
+# Mount pre-built frontend distribution if present
+_FRONTEND_DIST = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "frontend",
+    "dist",
+)
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")

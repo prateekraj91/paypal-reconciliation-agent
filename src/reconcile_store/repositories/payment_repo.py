@@ -9,7 +9,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from .base import BaseRepository, EntityNotFoundError, ConflictError
-from ..schema import PaymentRecord, AllocationRecord
+from ..schema import PaymentRecord, AllocationRecord, RefundRecord
 
 
 class IneligiblePaymentError(Exception):
@@ -145,7 +145,7 @@ class PaymentRepository(BaseRepository[PaymentRecord]):
         return int(self.session.scalar(stmt) or 0)
 
     def get_unapplied_cash_minor(self, tenant_id: str, payment_id: str) -> int:
-        """Remaining unallocated amount: payment.amount_minor - sum(approved allocations).
+        """Remaining unallocated amount: payment.amount_minor - sum(approved allocations) - sum(refunds/reversals).
 
         Invariant I2: Remainder must remain explicitly identifiable as unapplied cash.
         """
@@ -153,7 +153,13 @@ class PaymentRepository(BaseRepository[PaymentRecord]):
         if payment is None:
             raise EntityNotFoundError(f"Payment '{payment_id}' not found for tenant '{tenant_id}'")
         allocated = self.get_total_allocated_minor(tenant_id, payment_id)
-        return max(0, payment.amount_minor - allocated)
+        refund_stmt = select(func.coalesce(func.sum(RefundRecord.amount_minor), 0)).where(
+            RefundRecord.tenant_id == tenant_id,
+            RefundRecord.parent_payment_id.in_([payment.id, payment.provider_payment_id]),
+            RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
+        )
+        refunded = int(self.session.scalar(refund_stmt) or 0)
+        return max(0, payment.amount_minor - allocated - refunded)
 
     def validate_eligibility_for_allocation(self, payment: PaymentRecord) -> None:
         """Invariant I7: Only COMPLETED payments are eligible for approval."""
