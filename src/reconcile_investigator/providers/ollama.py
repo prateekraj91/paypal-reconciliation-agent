@@ -5,12 +5,98 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import httpx
 
-from .base import InvestigationContext, InvestigationModelProvider, InvestigationRawResponse
+from ..models import InvestigationClassification
+from .base import (
+    InvestigationContext,
+    InvestigationModelProvider,
+    InvestigationRawResponse,
+    citable_evidence_ids,
+)
 
 logger = logging.getLogger(__name__)
+
+PROMPT_VERSION = "1.1.0"
+# Must hold the prompt plus num_predict. Investigation prompts run past 4,000
+# tokens, and Ollama silently truncates anything over this limit.
+NUM_CTX = 8192
+NUM_PREDICT = 2048
+_MAX_LIST_ITEMS = 8
+
+
+def build_investigation_schema(allowed_evidence_ids: List[str]) -> Dict[str, Any]:
+    """Build the JSON schema Ollama enforces, limiting citations to this case's evidence.
+
+    ``supporting_evidence`` is left out on purpose: the orchestrator fills it from
+    authoritative context, so the model has no reason to author evidence records.
+    This schema only shapes generation. The independent verifier still decides.
+    """
+    evidence_id: Dict[str, Any] = {"type": "string", "enum": list(allowed_evidence_ids)}
+
+    def citations(min_items: int) -> Dict[str, Any]:
+        return {"type": "array", "items": evidence_id, "minItems": min_items, "maxItems": _MAX_LIST_ITEMS}
+
+    def objects(properties: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "type": "array",
+            "maxItems": _MAX_LIST_ITEMS,
+            "items": {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            },
+        }
+
+    text = {"type": "string"}
+    optional_int = {"type": ["integer", "null"]}
+    properties: Dict[str, Any] = {
+        "classification": {"type": "string", "enum": [c.value for c in InvestigationClassification]},
+        "executive_summary": text,
+        "verified_facts": objects({
+            "statement": text,
+            "evidence_ids": citations(1),
+            "amount_cents": optional_int,
+            "currency": {"type": ["string", "null"]},
+        }),
+        "candidate_invoice_analysis": objects({
+            "invoice_id": text,
+            "invoice_number": text,
+            "customer_match": {"type": "boolean"},
+            "amount_match": {"type": "boolean"},
+            "score": optional_int,
+            "assessment": text,
+        }),
+        "conflicting_evidence": objects({"issue": text, "evidence_ids": citations(1)}),
+        "missing_evidence": objects({
+            "missing_item": text,
+            "importance": {"type": "string", "enum": ["CRITICAL", "DESIRABLE", "OPTIONAL"]},
+            "why_needed": text,
+        }),
+        "hypotheses": objects({
+            "hypothesis_id": text,
+            "statement": text,
+            "likelihood": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+            "supporting_evidence_ids": citations(0),
+            "counter_evidence_ids": citations(0),
+        }),
+        "recommended_steps": objects({
+            "step_number": {"type": "integer", "minimum": 1},
+            "action": text,
+            "target": text,
+            "reason": text,
+        }),
+        "risk_flags": {"type": "array", "items": text, "maxItems": _MAX_LIST_ITEMS},
+        "requires_human_review": {"type": "boolean"},
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
 
 
 def extract_clean_json(text: str) -> str:
@@ -151,21 +237,25 @@ class OllamaProvider(InvestigationModelProvider):
         system_prompt: str,
         user_prompt: str,
     ) -> InvestigationRawResponse:
-        """Invoke local Ollama with JSON mode enabled."""
+        """Invoke local Ollama, constraining output to this case's evidence IDs."""
         url = f"{self.base_url}/api/chat"
+        allowed_ids = citable_evidence_ids(context)
+        # An enum cannot be empty; a case with no evidence falls back to plain JSON
+        # and any fact it asserts is then rejected by the verifier.
+        output_format: Any = build_investigation_schema(allowed_ids) if allowed_ids else "json"
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "format": "json",
+            "format": output_format,
             "stream": False,
             "think": False,
             "options": {
                 "temperature": 0.0,
-                "num_ctx": 4096,
-                "num_predict": 2048,
+                "num_ctx": NUM_CTX,
+                "num_predict": NUM_PREDICT,
             },
         }
 
@@ -191,7 +281,7 @@ class OllamaProvider(InvestigationModelProvider):
                         raw_json_str=clean_content,
                         provider_name="ollama",
                         model_name=self.model,
-                        prompt_version="1.0.0",
+                        prompt_version=PROMPT_VERSION,
                         latency_ms=latency_ms,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
