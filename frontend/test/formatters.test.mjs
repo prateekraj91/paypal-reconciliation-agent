@@ -183,3 +183,60 @@ test('getMatcherExplanation distinguishes reason categories instead of generic n
   assert.strictEqual(exact.category, 'exact');
   assert.strictEqual(exact.badgeLabel, 'Exact Match');
 });
+
+test('getMatcherExplanation correctly classifies EXACT-001, INJECTION-011, INVESTIGATE-010, and SPLIT-005 without false Amount Mismatch', () => {
+  // Case 1: EXACT-001 ($1,250 payment against $1,250 invoice)
+  const exact001 = getMatcherExplanation(
+    'PROPOSED',
+    ['REFERENCE_MATCH', 'AMOUNT_EXACT'],
+    0,
+    null,
+    [{ invoice_id: 'inv_exact_001', amount_minor: 125000 }]
+  );
+  assert.strictEqual(exact001.category, 'exact');
+  assert.strictEqual(exact001.badgeLabel, 'Exact Match');
+  assert.notStrictEqual(exact001.badgeLabel, 'Amount Mismatch');
+  assert.ok(exact001.summary.toLowerCase().includes('exact'));
+
+  // Case 2: INJECTION-011 ($500 payment against $500 invoice)
+  // Matching tier identifies exact match; safety verifier independently handles prompt injection
+  const injection011 = getMatcherExplanation(
+    'PROPOSED',
+    ['REFERENCE_MATCH', 'AMOUNT_EXACT'],
+    0,
+    null,
+    [{ invoice_id: 'inv_injection_011', amount_minor: 50000 }]
+  );
+  assert.strictEqual(injection011.category, 'exact');
+  assert.strictEqual(injection011.badgeLabel, 'Exact Match');
+  assert.notStrictEqual(injection011.badgeLabel, 'Amount Mismatch');
+
+  // Case 3: INVESTIGATE-010 ($890 payment against $890 invoice)
+  const investigate010 = getMatcherExplanation(
+    'PROPOSED',
+    ['REFERENCE_MATCH', 'AMOUNT_EXACT'],
+    0,
+    null,
+    [{ invoice_id: 'inv_cyberdyne_010', amount_minor: 89000 }]
+  );
+  assert.strictEqual(investigate010.category, 'exact');
+  assert.strictEqual(investigate010.badgeLabel, 'Exact Match');
+  assert.notStrictEqual(investigate010.badgeLabel, 'Amount Mismatch');
+
+  // Case 4: SPLIT-005 ($1,500 payment covering $900 + $600 invoices)
+  const split005 = getMatcherExplanation(
+    'PROPOSED',
+    ['REFERENCE_MATCH', 'AMOUNT_EXACT'],
+    0,
+    null,
+    [
+      { invoice_id: 'inv_split_5a', amount_minor: 90000 },
+      { invoice_id: 'inv_split_5b', amount_minor: 60000 },
+    ]
+  );
+  assert.strictEqual(split005.category, 'split');
+  assert.strictEqual(split005.badgeLabel, 'Exact Aggregate Match / Split Allocation');
+  assert.notStrictEqual(split005.badgeLabel, 'Amount Mismatch');
+  assert.ok(split005.summary.includes('Split payment allocation'));
+  assert.ok(split005.summary.includes('2 invoices'));
+});

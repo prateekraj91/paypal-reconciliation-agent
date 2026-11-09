@@ -425,7 +425,8 @@ export function EvidenceInspectModal({
     proposal.outcome,
     proposal.evidence,
     proposal.excess_amount_minor,
-    proposal.ambiguity_certificate
+    proposal.ambiguity_certificate,
+    proposal.allocations
   );
 
   return (
