@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
 import {
   formatReconciliationRate,
   getInvestigationEmptyLabels,
@@ -9,6 +10,7 @@ import {
   validateHeaderValue,
   getMatcherExplanation,
   isApprovalEligible,
+  getFactSectionPresentation,
 } from '../src/utils/formatters.ts';
 
 test('formatReconciliationRate handles zero denominator without showing 100%', () => {
@@ -247,4 +249,27 @@ test('isApprovalEligible fails closed unless the backend explicitly allows appro
   assert.strictEqual(isApprovalEligible({ approval_eligible: false, verifier_status: 'VERIFIED' }), false);
   assert.strictEqual(isApprovalEligible({ verifier_status: 'VERIFIED' }), false);
   assert.strictEqual(isApprovalEligible({ approval_eligible: true, verifier_status: 'INVALID' }), false);
+});
+
+test('rejected investigations never present model claims as verified', () => {
+  const invalid = getFactSectionPresentation(true);
+  assert.strictEqual(invalid.heading, 'Unverified Model Claims');
+  assert.strictEqual(invalid.badge, 'Rejected by Verifier');
+  const styling = [invalid.cardClass, invalid.dividerClass, invalid.headingClass, invalid.badgeClass, invalid.rowClass].join(' ');
+  assert.doesNotMatch(`${invalid.heading} ${invalid.badge} ${invalid.emptyText}`, /verified facts|grounded/i);
+  assert.doesNotMatch(styling, /emerald|green/);
+});
+
+test('accepted investigations keep the verified facts heading', () => {
+  const accepted = getFactSectionPresentation(false);
+  assert.strictEqual(accepted.heading, 'Verified Facts');
+  assert.strictEqual(accepted.badge, 'Grounded in DB Evidence');
+  assert.match(accepted.headingClass, /emerald/);
+});
+
+test('investigation page takes its fact heading from the verifier outcome', () => {
+  const page = readFileSync(new URL('../src/pages/InvestigationDetailPage.tsx', import.meta.url), 'utf8');
+  assert.match(page, /getFactSectionPresentation\(isInvalid\)/);
+  assert.doesNotMatch(page, />\s*Verified Facts/);
+  assert.doesNotMatch(page, />\s*Grounded in DB Evidence/);
 });
