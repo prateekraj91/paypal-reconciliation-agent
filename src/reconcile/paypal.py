@@ -148,6 +148,18 @@ def sync_windows(
     return tuple(windows)
 
 
+# Transaction Search also reports account events that move a balance without any
+# customer paying. T1900 is the Sandbox opening balance ("Initial balance"): its
+# amount is positive, so the sign alone cannot exclude it.
+NON_PAYMENT_EVENT_CODES = frozenset({"T1900"})
+
+
+def is_non_payment_event(item: dict[str, Any]) -> bool:
+    """True when a raw Transaction Search record is an account event, not a payment."""
+    info = item.get("transaction_info") or {}
+    return str(info.get("transaction_event_code", "")).strip().upper() in NON_PAYMENT_EVENT_CODES
+
+
 @dataclass(frozen=True)
 class TransactionIngest:
     """Canonical payments from Transaction Search, with their source evidence.
@@ -162,6 +174,7 @@ class TransactionIngest:
     raw_by_id: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     skipped: tuple[tuple[str, str], ...] = ()
     windows: tuple[tuple[datetime, datetime], ...] = ()
+    non_payment_ids: tuple[str, ...] = ()
 
     @property
     def transaction_count(self) -> int:
@@ -958,6 +971,9 @@ class PayPalClient:
             )
         txn_id = str(txn_id).strip()
 
+        if is_non_payment_event(item):
+            return None
+
         amount = info.get("transaction_amount") or {}
         raw_currency = amount.get("currency_code")
         if not raw_currency or not str(raw_currency).strip():
@@ -1043,6 +1059,7 @@ class PayPalClient:
         raw_by_id: dict[str, dict[str, Any]] = {}
         payments: dict[str, Payment] = {}
         skipped: list[tuple[str, str]] = []
+        non_payment_ids: dict[str, None] = {}
 
         for item in items:
             payment = self.map_transaction(item)
@@ -1053,12 +1070,19 @@ class PayPalClient:
 
             if payment is None:
                 amount = (info.get("transaction_amount") or {}).get("value")
-                if not any(t == txn_id for t, _ in skipped):
-                    skipped.append((
-                        txn_id,
+                if is_non_payment_event(item):
+                    non_payment_ids[txn_id] = None
+                    reason = (
+                        f"event code {info.get('transaction_event_code')} is an "
+                        f"account balance event, not a customer payment"
+                    )
+                else:
+                    reason = (
                         f"amount {amount} is not a positive payment received "
-                        f"(fee, refund or transfer)",
-                    ))
+                        f"(fee, refund or transfer)"
+                    )
+                if not any(t == txn_id for t, _ in skipped):
+                    skipped.append((txn_id, reason))
                 continue
 
             existing = payments.get(txn_id)
@@ -1078,6 +1102,7 @@ class PayPalClient:
             raw_by_id=raw_by_id,
             skipped=tuple(skipped),
             windows=tuple(windows),
+            non_payment_ids=tuple(non_payment_ids),
         )
 
     def list_transactions(
