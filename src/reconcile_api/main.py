@@ -1006,7 +1006,7 @@ def get_dashboard_summary(
         unapplied = pay_repo.get_unapplied_cash_minor(effective_tenant, p.id)
         bucket["unapplied_cash_minor"] += unapplied
         bucket["unapplied_amount_minor"] += unapplied
-        allocated = p.amount_minor - unapplied
+        allocated = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
         bucket["reconciled_amount_minor"] += allocated
 
         if unapplied > 0:
@@ -1202,6 +1202,7 @@ def list_transactions(
                 if (p.status or "").upper() != norm_s:
                     continue
 
+        allocated_amount = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
         filtered_transactions.append({
             "id": p.id,
             "provider": p.provider,
@@ -1215,7 +1216,7 @@ def list_transactions(
             "note": p.note,
             "received_at": p.received_at.isoformat() if p.received_at else None,
             "unapplied_cash_minor": unapplied,
-            "allocated_minor": p.amount_minor - unapplied,
+            "allocated_minor": allocated_amount,
             "reconciliation_status": reconciliation_status,
             "record_type": rec_type,
             "refund_amount_minor": refund_minor,
@@ -1415,6 +1416,8 @@ def get_transaction(
     else:
         reconciliation_status = "PARTIALLY_RECONCILED"
 
+    allocated_amount = pay_repo.get_total_allocated_minor(effective_tenant, p.id)
+
     return {
         "id": p.id,
         "provider": p.provider,
@@ -1428,7 +1431,7 @@ def get_transaction(
         "note": p.note,
         "received_at": p.received_at.isoformat() if p.received_at else None,
         "unapplied_cash_minor": unapplied,
-        "allocated_minor": p.amount_minor - unapplied,
+        "allocated_minor": allocated_amount,
         "reconciliation_status": reconciliation_status,
         "record_type": rec_type,
         "refund_amount_minor": refund_minor,
@@ -1759,6 +1762,16 @@ def _enrich_proposal_payload(
                     "memo": cinv.memo,
                 })
         ambiguity_cert["candidates_detail"] = cand_details
+
+    # Split allocation explanation
+    if len(p.allocations) > 1:
+        split_msg = "Split Allocation: Remittance aggregate amount satisfies multiple invoices."
+        if split_msg not in evidence and not any("split allocation:" in str(e).lower() for e in evidence):
+            evidence.append(split_msg)
+    elif p.outcome == "PROPOSED" and len(p.allocations) == 1:
+        exact_msg = "Exact Match: Remittance reference and amount corroborate open invoice."
+        if exact_msg not in evidence and not any("exact match:" in str(e).lower() for e in evidence):
+            evidence.append(exact_msg)
 
     return evidence, ambiguity_cert
 

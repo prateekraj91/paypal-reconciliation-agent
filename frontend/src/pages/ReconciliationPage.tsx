@@ -235,7 +235,8 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                         p.outcome,
                         p.evidence,
                         p.excess_amount_minor,
-                        p.ambiguity_certificate
+                        p.ambiguity_certificate,
+                        p.allocations
                       );
 
                       return (

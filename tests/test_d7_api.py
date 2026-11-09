@@ -1237,4 +1237,85 @@ def test_complete_accounting_lifecycle_refunds_and_reversals(test_db, client):
     assert tx_part["reconciliation_status"] == "RECONCILED"
 
 
+def test_dashboard_reconciled_amount_does_not_count_refunds_or_reversals(client):
+    """Verify that refunded and reversed payments ($550) are never counted in reconciled_amount_minor.
+
+    Root Cause Test:
+    Prior to the fix, main.py calculated:
+        allocated = p.amount_minor - unapplied
+    Because PAY-DEMO-REFUND-007 ($150) and PAY-DEMO-REVERSAL-008 ($400) had unapplied_cash == 0,
+    the dashboard incorrectly added $150 + $400 = $550 to reconciled_amount_minor, even though
+    zero dollars were allocated to canonical invoices.
+
+    This test verifies:
+    1. Fresh demo seed has reconciled_amount_minor == 0, unapplied_cash_minor == 736000 ($7,360),
+       and ingested == 791000 ($7,910).
+    2. Approving PAY-DEMO-EXACT-001 ($1,250) increments reconciled_amount_minor to exactly 125000.
+    3. Refunded/reversed payments continue to be excluded from reconciled invoice value.
+    """
+    client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
+
+    resp = client.get("/admin/dashboard/summary?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    usd = data["financial_totals"]["USD"]
+    # Ingested: $7,910.00
+    assert usd["payments_amount_minor"] == 791000
+    # Reconciled to Invoices MUST be $0.00 when zero proposals are approved
+    # (NOT $550.00 from refunds/reversals!)
+    assert usd["reconciled_amount_minor"] == 0
+    # Unapplied cash is $7,360.00 (the 9 unallocated non-refunded payments)
+    assert usd["unapplied_cash_minor"] == 736000
+
+    # Verify transaction list has allocated_minor == 0 for refund and reversal
+    resp_tx = client.get("/admin/transactions?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp_tx.status_code == 200
+    tx_map = {t["provider_payment_id"]: t for t in resp_tx.json()["transactions"]}
+    assert tx_map["PAY-DEMO-REFUND-007"]["allocated_minor"] == 0
+    assert tx_map["PAY-DEMO-REVERSAL-008"]["allocated_minor"] == 0
+
+    # Now approve proposal for PAY-DEMO-EXACT-001 ($1,250.00)
+    resp_props = client.get("/admin/proposals?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp_props.status_code == 200
+    exact_prop = next(p for p in resp_props.json()["proposals"] if p["provider_payment_id"] == "PAY-DEMO-EXACT-001")
+
+    resp_appr = client.post(
+        f"/admin/proposals/{exact_prop['id']}/approve",
+        json={
+            "reviewer": "operator@example.demo",
+            "tenant_id": "demo_merchant",
+            "reason": "Test approval of exact match",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp_appr.status_code == 200
+
+    # Re-fetch dashboard summary
+    resp_after = client.get("/admin/dashboard/summary?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp_after.status_code == 200
+    usd_after = resp_after.json()["financial_totals"]["USD"]
+    # Reconciled to Invoices MUST now be exactly $1,250.00 (125000)
+    assert usd_after["reconciled_amount_minor"] == 125000
+    # Unapplied cash decreased by $1,250.00: 736000 - 125000 = 611000 ($6,110.00)
+    assert usd_after["unapplied_cash_minor"] == 611000
+
+
+def test_proposal_evidence_enrichment_split_and_exact(client):
+    """Verify proposal evidence enrichment accurately describes split allocations and exact matches."""
+    client.post("/admin/demo/seed", json={"tenant_id": "demo_merchant"}, headers=AUTH_HEADERS)
+
+    resp = client.get("/admin/proposals?tenant_id=demo_merchant", headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    props = {p["provider_payment_id"]: p for p in resp.json()["proposals"]}
+
+    # Split payment: PAY-DEMO-SPLIT-005 ($1,500 across 2 invoices)
+    split_prop = props["PAY-DEMO-SPLIT-005"]
+    assert len(split_prop["allocations"]) == 2
+    assert any("Split Allocation" in e for e in split_prop["evidence"])
+
+    # Exact payment: PAY-DEMO-EXACT-001 ($1,250 against 1 invoice)
+    exact_prop = props["PAY-DEMO-EXACT-001"]
+    assert len(exact_prop["allocations"]) == 1
+    assert any("Exact Match" in e for e in exact_prop["evidence"])
 

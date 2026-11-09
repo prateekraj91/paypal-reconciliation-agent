@@ -177,7 +177,7 @@ export function TransactionsPage({
                   <th className="whitespace-nowrap text-right pr-3">Net Amount</th>
                   <th className="whitespace-nowrap text-right pr-3">Unapplied Cash</th>
                   <th className="whitespace-nowrap">Reconciliation State</th>
-                  <th className="col-sticky-right text-right w-28 whitespace-nowrap">Actions</th>
+                  <th className="text-right w-28 whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -241,7 +241,7 @@ export function TransactionsPage({
                     <td className="whitespace-nowrap">
                       <StatusBadge status={tx.reconciliation_status || 'UNMATCHED'} />
                     </td>
-                    <td className="col-sticky-right text-right" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       {tx.unapplied_cash_minor > 0 && (
                         <button
                           onClick={() => onStartInvestigation(tx.provider_payment_id)}

@@ -178,19 +178,47 @@ export interface MatcherExplanation {
 }
 
 /**
+ * Format raw evidence signals into human-readable sentences for evidence inspector.
+ */
+function formatSignal(detail: string): string {
+  if (typeof detail !== 'string') return String(detail);
+  const trimmed = detail.trim();
+  switch (trimmed) {
+    case 'REFERENCE_MATCH':
+      return 'Invoice Reference Match: Remittance reference or memo matches candidate invoice identifier.';
+    case 'EXACT_INVOICE_NUMBER_MATCH':
+      return 'Exact Invoice Match: Payment reference exactly matches invoice number.';
+    case 'AMOUNT_EXACT':
+      return 'Exact Amount Match: Payment amount exactly equals candidate invoice balance.';
+    case 'AMOUNT_PARTIAL':
+      return 'Partial Amount: Remittance partially satisfies open invoice balance.';
+    case 'AMOUNT_OVERPAYMENT':
+      return 'Overpayment: Remittance amount exceeds open invoice balance.';
+    case 'CURRENCY_MISMATCH':
+      return 'Remittance currency differs from candidate invoice currency.';
+    case 'FUZZY_REFERENCE_MATCH':
+      return 'Fuzzy Reference Match: Invoice digits identified in payment description.';
+    default:
+      return detail;
+  }
+}
+
+/**
  * Explain matching evidence and outcomes with financial precision.
  * Distinguishes "No candidate invoices found", "Amount mismatch",
- * "Multiple competing candidates", "Currency mismatch", "Insufficient corroboration".
+ * "Multiple competing candidates", "Currency mismatch", "Insufficient corroboration",
+ * "Exact Match", and "Exact Aggregate Match / Split Allocation".
  */
 export function getMatcherExplanation(
   outcome: string | null | undefined,
   evidence?: string[] | null,
   excessMinor?: number | null,
-  ambiguityCert?: Record<string, any> | null
+  ambiguityCert?: Record<string, any> | null,
+  allocations?: Array<{ amount_minor?: number; [key: string]: any }> | null
 ): MatcherExplanation {
   const norm = (outcome || '').toUpperCase();
   const ev = evidence || [];
-  const details = [...ev];
+  const details = ev.map(formatSignal);
   const evText = ev.join(' ').toLowerCase();
 
   // 1. Multiple competing candidates / Ambiguity
@@ -201,7 +229,11 @@ export function getMatcherExplanation(
     evText.includes('competing') ||
     evText.includes('multiple_candidates')
   ) {
-    const candCount = ambiguityCert?.candidate_invoice_ids?.length || ambiguityCert?.candidate_invoices?.length || ambiguityCert?.candidates?.length || 2;
+    const candCount =
+      ambiguityCert?.candidate_invoice_ids?.length ||
+      ambiguityCert?.candidate_invoices?.length ||
+      ambiguityCert?.candidates?.length ||
+      2;
     return {
       badgeLabel: 'Multiple Competing Candidates',
       category: 'ambiguous',
@@ -215,8 +247,7 @@ export function getMatcherExplanation(
     norm.includes('CURRENCY_MISMATCH') ||
     norm.includes('CURRENCY') ||
     evText.includes('currency_mismatch') ||
-    evText.includes('currency mismatch') ||
-    evText.includes('currency')
+    evText.includes('currency mismatch')
   ) {
     const detailedMismatch = details.find(
       (d) => typeof d === 'string' && d.toLowerCase().includes('currency mismatch:')
@@ -229,8 +260,13 @@ export function getMatcherExplanation(
     };
   }
 
-  // 3. Overpayment / Underpayment / Partial / Split
-  if (norm.includes('OVERPAYMENT') || (excessMinor && excessMinor > 0) || evText.includes('excess') || evText.includes('overpayment')) {
+  // 3. Overpayment
+  if (
+    norm.includes('OVERPAYMENT') ||
+    (excessMinor && excessMinor > 0) ||
+    evText.includes('amount_overpayment') ||
+    evText.includes('overpayment')
+  ) {
     const diff = excessMinor ? ` by $${(excessMinor / 100).toFixed(2)}` : '';
     return {
       badgeLabel: 'Amount Mismatch (Overpayment)',
@@ -240,9 +276,29 @@ export function getMatcherExplanation(
     };
   }
 
+  // 4. Split Payment / Aggregate Match
+  const isSplit =
+    (allocations && allocations.length > 1) ||
+    norm.includes('SPLIT') ||
+    evText.includes('split') ||
+    evText.includes('aggregate');
+
+  if (isSplit) {
+    const count = allocations && allocations.length > 1 ? ` across ${allocations.length} invoices` : '';
+    return {
+      badgeLabel: 'Exact Aggregate Match / Split Allocation',
+      category: 'split',
+      summary: `Split payment allocation${count}: Aggregate amount satisfies outstanding invoices exactly`,
+      details: details.length > 0 ? details : ['Remittance satisfies multiple outstanding invoices exactly.'],
+    };
+  }
+
+  // 5. Partial payment
   if (
     norm.includes('PARTIAL') ||
+    norm.includes('UNDERPAYMENT') ||
     evText.includes('amount_partial') ||
+    evText.includes('underpayment') ||
     evText.includes('partial')
   ) {
     return {
@@ -253,16 +309,12 @@ export function getMatcherExplanation(
     };
   }
 
-  if (norm.includes('UNDERPAYMENT') || evText.includes('underpayment')) {
-    return {
-      badgeLabel: 'Amount Mismatch (Partial)',
-      category: 'amount_mismatch',
-      summary: 'Amount mismatch: Payment partially satisfies invoice',
-      details: details.length > 0 ? details : ['Payment amount is less than invoice total.'],
-    };
-  }
-
-  if (evText.includes('amount mismatch') || evText.includes('amount')) {
+  // 6. Genuine Amount Mismatch (reference found or candidates found, but amounts mismatch)
+  if (
+    norm.includes('AMOUNT_MISMATCH') ||
+    evText.includes('amount_mismatch') ||
+    evText.includes('amount mismatch')
+  ) {
     return {
       badgeLabel: 'Amount Mismatch',
       category: 'amount_mismatch',
@@ -271,27 +323,29 @@ export function getMatcherExplanation(
     };
   }
 
-  if (norm.includes('SPLIT')) {
-    return {
-      badgeLabel: 'Split Payment',
-      category: 'split',
-      summary: 'Split payment allocation across multiple invoices',
-      details: details.length > 0 ? details : ['Remittance satisfies multiple outstanding invoices.'],
-    };
-  }
-
-  // 4. Exact / Proposed match
-  if (norm === 'EXACT_MATCH' || norm === 'PROPOSED') {
+  // 7. Exact / Proposed match
+  if (
+    norm === 'EXACT_MATCH' ||
+    norm === 'PROPOSED' ||
+    ev.includes('AMOUNT_EXACT') ||
+    ev.includes('EXACT_MATCH') ||
+    evText.includes('amount_exact')
+  ) {
     return {
       badgeLabel: 'Exact Match',
       category: 'exact',
-      summary: 'Authoritative candidate match verified against ledger',
-      details: details.length > 0 ? details : ['Corroborated by invoice reference and amount.'],
+      summary: 'Exact reference and amount match verified against ledger',
+      details: details.length > 0 ? details : ['Corroborated by invoice reference and exact amount.'],
     };
   }
 
-  // 5. Insufficient corroboration
-  if (norm === 'UNVERIFIED' || evText.includes('insufficient') || evText.includes('unverified') || evText.includes('corroboration')) {
+  // 8. Insufficient corroboration
+  if (
+    norm === 'UNVERIFIED' ||
+    evText.includes('insufficient') ||
+    evText.includes('unverified') ||
+    evText.includes('corroboration')
+  ) {
     return {
       badgeLabel: 'Insufficient Corroboration',
       category: 'insufficient_corroboration',
@@ -300,7 +354,7 @@ export function getMatcherExplanation(
     };
   }
 
-  // 6. No candidates found
+  // 9. No candidates found
   return {
     badgeLabel: 'No Candidate Invoices',
     category: 'no_candidates',
