@@ -10,7 +10,7 @@ from typing import Optional, Sequence, Any, Dict, List, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, and_
 from sqlalchemy.orm import Session
 
 from .schema import (
@@ -24,11 +24,13 @@ from .schema import (
     DecisionRecord,
     VerificationRecord,
     AuditEventRecord,
+    RefundRecord,
+    InvestigationRecord,
 )
 from .canonical import canonical_json
 from .repositories.base import EntityNotFoundError, ConflictError, StaleVersionError, TenantIsolationError
-from .repositories.invoice_repo import IneligibleInvoiceError
-from .repositories.payment_repo import IneligiblePaymentError
+from .repositories.invoice_repo import InvoiceRepository, IneligibleInvoiceError
+from .repositories.payment_repo import PaymentRepository, IneligiblePaymentError
 from .repositories.allocation_repo import LedgerConstraintError
 from .repositories.audit_repo import AuditRepository
 
@@ -43,6 +45,8 @@ from reconcile.models import (
     Payment,
     PaymentAllocation,
     PaymentStatus,
+    Refund,
+    PaymentReversal,
 )
 from reconcile.verifier import verify_proposals, VerificationResult
 
@@ -69,6 +73,270 @@ class ApprovalResult:
     allocation_ids: tuple[str, ...]
     audit_event_id: str
     is_idempotent_replay: bool
+
+
+@dataclass(frozen=True)
+class ProposalSafetyEvaluation:
+    """Authoritative evaluation of proposal safety against linked AI investigations."""
+
+    effective_verifier_status: str
+    approval_eligible: bool
+    approval_prohibited_reason: Optional[str]
+    linked_investigation: Optional[Dict[str, Any]]
+
+
+def evaluate_proposal_investigation_safety(
+    session: Session,
+    tenant_id: str,
+    proposal: ProposalRecord,
+    payment: Optional[PaymentRecord] = None,
+    invoices_by_id: Optional[Dict[str, InvoiceRecord]] = None,
+    proposed_allocs: Optional[Sequence[ProposalAllocationRecord]] = None,
+) -> ProposalSafetyEvaluation:
+    """Evaluate proposal safety against tenant-scoped linked AI investigations.
+
+    Enforces non-negotiable financial safety invariants:
+    - Authoritative tenant-scoped database relationships: InvestigationRecord.tenant_id == tenant_id.
+    - Linked by target_id matching payment.id, payment.provider_payment_id, or proposal.id.
+    - INVALID status or prompt injection suspect ALWAYS blocks approval (fail-closed).
+    - NEEDS_REVIEW requires independent safety invariants to pass, positive ALLOCATE_PAYMENT
+      recommendation matching allocations, and no unresolved customer mismatches or conflicts.
+    - Legitimate human review where all invariants passed and no unresolved conflicts exist is allowed.
+    """
+    if payment is None and proposal.payment_id:
+        payment = session.get(PaymentRecord, proposal.payment_id)
+
+    target_payment_ids = []
+    if payment:
+        if payment.id:
+            target_payment_ids.append(payment.id)
+        if payment.provider_payment_id:
+            target_payment_ids.append(payment.provider_payment_id)
+
+    conditions = []
+    if proposal.id:
+        conditions.append(
+            and_(
+                InvestigationRecord.target_type == "proposal",
+                InvestigationRecord.target_id == proposal.id,
+            )
+        )
+    if target_payment_ids:
+        conditions.append(
+            and_(
+                InvestigationRecord.target_type == "payment",
+                InvestigationRecord.target_id.in_(target_payment_ids),
+            )
+        )
+
+    linked_invs: List[InvestigationRecord] = []
+    if conditions:
+        stmt = (
+            select(InvestigationRecord)
+            .where(
+                InvestigationRecord.tenant_id == tenant_id,
+                or_(*conditions),
+            )
+            .order_by(InvestigationRecord.created_at.desc())
+        )
+        linked_invs = list(session.scalars(stmt).all())
+
+    if not linked_invs:
+        is_eligible = (
+            proposal.outcome == "PROPOSED"
+            and proposal.verifier_status != "INVALID"
+            and proposal.verifier_status != "UNVERIFIED"
+        )
+        reason = (
+            None
+            if is_eligible
+            else f"Proposal outcome '{proposal.outcome}' or status '{proposal.verifier_status}' is not eligible for approval."
+        )
+        return ProposalSafetyEvaluation(
+            effective_verifier_status=proposal.verifier_status,
+            approval_eligible=is_eligible,
+            approval_prohibited_reason=reason,
+            linked_investigation=None,
+        )
+
+    # 1. FAIL-CLOSED: Check for ANY INVALID investigation or prompt injection suspect
+    for inv in linked_invs:
+        inv_res = inv.result if isinstance(inv.result, dict) else {}
+        risk_flags = inv_res.get("risk_flags", []) if isinstance(inv_res, dict) else []
+        is_injection = (
+            inv.classification in {"PROMPT_INJECTION_SUSPECT", "PROMPT_INJECTION_DETECTED"}
+            or any("PROMPT_INJECTION" in str(rf).upper() for rf in risk_flags)
+        )
+        if inv.status == "INVALID" or inv.verifier_status == "INVALID" or is_injection:
+            inv_summary = {
+                "id": inv.id,
+                "status": "INVALID",
+                "classification": inv.classification or ("PROMPT_INJECTION_SUSPECT" if is_injection else None),
+                "verifier_status": "INVALID",
+                "summary": inv.summary,
+                "risk_flags": risk_flags,
+            }
+            classif_desc = inv.classification or "PROMPT_INJECTION_SUSPECT"
+            reason = (
+                f"Adversarial prompt injection tokens detected in payment remittance ({classif_desc}). "
+                "Safety verifier failed closed. Approval is strictly prohibited."
+            )
+            return ProposalSafetyEvaluation(
+                effective_verifier_status="INVALID",
+                approval_eligible=False,
+                approval_prohibited_reason=reason,
+                linked_investigation=inv_summary,
+            )
+
+    # 2. NEEDS_REVIEW: Verify safety invariants, customer matching, and resolution
+    for inv in linked_invs:
+        if inv.status == "NEEDS_REVIEW" or inv.verifier_status == "NEEDS_REVIEW":
+            inv_res = inv.result if isinstance(inv.result, dict) else {}
+            v_details = inv.verifier_details if isinstance(inv.verifier_details, dict) else {}
+            risk_flags = inv_res.get("risk_flags", [])
+
+            inv_summary = {
+                "id": inv.id,
+                "status": inv.status,
+                "classification": inv.classification,
+                "verifier_status": "NEEDS_REVIEW",
+                "summary": inv.summary,
+                "risk_flags": risk_flags,
+            }
+
+            # 2a: Independent safety invariants check
+            inv_passed = v_details.get("passed", False)
+            checked_invariants = v_details.get("checked_invariants", {})
+            if not inv_passed or not all(checked_invariants.values()):
+                issues = v_details.get("issues", ["Independent safety verifier invariants failed"])
+                issues_str = "; ".join(issues) if isinstance(issues, list) else str(issues)
+                return ProposalSafetyEvaluation(
+                    effective_verifier_status="NEEDS_REVIEW",
+                    approval_eligible=False,
+                    approval_prohibited_reason=f"Independent safety verifier invariants failed for investigation '{inv.id}': {issues_str}",
+                    linked_investigation=inv_summary,
+                )
+
+            # 2b: Conflicting evidence check
+            conflicting = inv_res.get("conflicting_evidence", [])
+            if conflicting:
+                return ProposalSafetyEvaluation(
+                    effective_verifier_status="NEEDS_REVIEW",
+                    approval_eligible=False,
+                    approval_prohibited_reason=f"Unresolved conflicting evidence in investigation '{inv.id}': {conflicting}",
+                    linked_investigation=inv_summary,
+                )
+
+            # 2c: Candidate invoice customer mismatch (unverified remitter)
+            cand_analyses = inv_res.get("candidate_invoice_analysis", [])
+            for cand in cand_analyses:
+                if cand.get("customer_match") is False:
+                    payer_label = payment.payer_name if (payment and payment.payer_name) else "Payment remitter"
+                    inv_label = cand.get("invoice_number") or cand.get("invoice_id") or "target invoice"
+                    remitter_reason = (
+                        f"Unresolved customer mismatch: Remitter '{payer_label}' does not match customer for invoice '{inv_label}'. "
+                        "Third-party clearinghouse relationship remains unverified."
+                    )
+                    return ProposalSafetyEvaluation(
+                        effective_verifier_status="NEEDS_REVIEW",
+                        approval_eligible=False,
+                        approval_prohibited_reason=remitter_reason,
+                        linked_investigation=inv_summary,
+                    )
+
+            # 2d: Positive ALLOCATE_PAYMENT recommendation matching proposed allocations
+            sugg_res = inv_res.get("suggested_resolution")
+            if not sugg_res or not isinstance(sugg_res, dict):
+                return ProposalSafetyEvaluation(
+                    effective_verifier_status="NEEDS_REVIEW",
+                    approval_eligible=False,
+                    approval_prohibited_reason=f"Investigation '{inv.id}' in NEEDS_REVIEW has no suggested resolution.",
+                    linked_investigation=inv_summary,
+                )
+
+            if sugg_res.get("resolution_type") != "ALLOCATE_PAYMENT":
+                return ProposalSafetyEvaluation(
+                    effective_verifier_status="NEEDS_REVIEW",
+                    approval_eligible=False,
+                    approval_prohibited_reason=f"Investigation '{inv.id}' suggested resolution is '{sugg_res.get('resolution_type')}', not ALLOCATE_PAYMENT.",
+                    linked_investigation=inv_summary,
+                )
+
+            if proposed_allocs is None:
+                stmt_palloc = select(ProposalAllocationRecord).where(
+                    ProposalAllocationRecord.tenant_id == tenant_id,
+                    ProposalAllocationRecord.proposal_id == proposal.id,
+                )
+                proposed_allocs = list(session.scalars(stmt_palloc).all())
+
+            if invoices_by_id is None and proposed_allocs:
+                aff_ids = {pa.invoice_id for pa in proposed_allocs}
+                stmt_invs = select(InvoiceRecord).where(
+                    InvoiceRecord.tenant_id == tenant_id,
+                    InvoiceRecord.id.in_(aff_ids),
+                )
+                invoices_by_id = {inv.id: inv for inv in session.scalars(stmt_invs).all()}
+
+            sugg_allocs = sugg_res.get("suggested_allocations")
+            sugg_amt = sugg_res.get("suggested_amount_cents")
+            total_proposed = sum(pa.amount_minor for pa in proposed_allocs) if proposed_allocs else 0
+
+            if sugg_allocs and isinstance(sugg_allocs, dict):
+                for pa in proposed_allocs:
+                    inv = (invoices_by_id or {}).get(pa.invoice_id)
+                    keys_to_test = [pa.invoice_id]
+                    if inv:
+                        keys_to_test.extend([inv.provider_invoice_id, inv.invoice_number])
+                    matched_val = None
+                    for k in keys_to_test:
+                        if k in sugg_allocs:
+                            matched_val = sugg_allocs[k]
+                            break
+                    if matched_val is None or matched_val != pa.amount_minor:
+                        return ProposalSafetyEvaluation(
+                            effective_verifier_status="NEEDS_REVIEW",
+                            approval_eligible=False,
+                            approval_prohibited_reason=(
+                                f"Proposed allocation for invoice '{inv.invoice_number if inv else pa.invoice_id}' "
+                                f"({pa.amount_minor}) does not match investigation suggestion ({matched_val})."
+                            ),
+                            linked_investigation=inv_summary,
+                        )
+            elif sugg_amt is not None and sugg_amt != total_proposed:
+                return ProposalSafetyEvaluation(
+                    effective_verifier_status="NEEDS_REVIEW",
+                    approval_eligible=False,
+                    approval_prohibited_reason=(
+                        f"Proposed total allocation ({total_proposed}) does not match investigation suggested amount ({sugg_amt})."
+                    ),
+                    linked_investigation=inv_summary,
+                )
+
+            # Legitimate human review where all invariants passed and no unresolved conflicts exist
+            is_eligible = (proposal.outcome == "PROPOSED")
+            return ProposalSafetyEvaluation(
+                effective_verifier_status="NEEDS_REVIEW",
+                approval_eligible=is_eligible,
+                approval_prohibited_reason=None if is_eligible else f"Proposal outcome is {proposal.outcome}",
+                linked_investigation=inv_summary,
+            )
+
+    # 3. Linked investigation exists and is COMPLETED / VERIFIED
+    latest_inv = linked_invs[0]
+    inv_summary = {
+        "id": latest_inv.id,
+        "status": latest_inv.status,
+        "classification": latest_inv.classification,
+        "verifier_status": latest_inv.verifier_status,
+        "summary": latest_inv.summary,
+    }
+    is_eligible = (proposal.outcome == "PROPOSED" and proposal.verifier_status == "VERIFIED" and latest_inv.status != "INVALID")
+    return ProposalSafetyEvaluation(
+        effective_verifier_status=proposal.verifier_status,
+        approval_eligible=is_eligible,
+        approval_prohibited_reason=None if is_eligible else f"Proposal outcome '{proposal.outcome}' is ineligible.",
+        linked_investigation=inv_summary,
+    )
 
 
 class ApprovalService:
@@ -246,6 +514,22 @@ class ApprovalService:
                     )
 
             # ------------------------------------------------------------------
+            # STEP 3B: Authoritative Investigation Safety Gate
+            # ------------------------------------------------------------------
+            safety_eval = evaluate_proposal_investigation_safety(
+                session=self.session,
+                tenant_id=tenant_id,
+                proposal=proposal,
+                payment=payment,
+                invoices_by_id=invoices_by_id,
+                proposed_allocs=proposed_allocs,
+            )
+            if not safety_eval.approval_eligible:
+                raise ApprovalError(
+                    f"Proposal approval blocked: {safety_eval.approval_prohibited_reason or 'Proposal is not eligible for approval'}"
+                )
+
+            # ------------------------------------------------------------------
             # STEP 4: RERUN THE EXISTING INDEPENDENT VERIFIER
             # ------------------------------------------------------------------
             domain_payment = payment.to_domain()
@@ -327,7 +611,38 @@ class ApprovalService:
                 payment_id=payment.provider_payment_id,
                 candidates=(candidate,),
                 outcome=MatchOutcome.PROPOSED,
+                excess_amount_cents=proposal.excess_amount_minor,
             )
+
+            # Load completed refunds and reversals affecting these invoices and payments
+            linked_pay_db_ids = {eda.payment_id for eda in existing_db_allocs}
+            for eds in existing_db_settlements:
+                if eds.payment_id:
+                    linked_pay_db_ids.add(eds.payment_id)
+
+            ref_conditions = [RefundRecord.invoice_id.in_(affected_invoice_ids)]
+            if linked_pay_db_ids:
+                ref_conditions.append(
+                    RefundRecord.parent_payment_id.in_(list(linked_pay_db_ids))
+                )
+
+            stmt_exist_refs = select(RefundRecord).where(
+                RefundRecord.tenant_id == tenant_id,
+                RefundRecord.status.in_(["COMPLETED", "SUCCESS", "SETTLED"]),
+                or_(*ref_conditions),
+            )
+            db_refund_recs = self.session.scalars(stmt_exist_refs).all()
+            domain_refunds: List[Refund] = []
+            domain_reversals: List[PaymentReversal] = []
+            for r in db_refund_recs:
+                r_pay = self.session.get(PaymentRecord, r.parent_payment_id) if r.parent_payment_id else None
+                pay_id_str = r_pay.provider_payment_id if r_pay else "unknown"
+                r_inv = self.session.get(InvoiceRecord, r.invoice_id) if r.invoice_id else None
+                inv_id_str = r_inv.provider_invoice_id if r_inv else None
+                if getattr(r, "record_type", "REFUND") == "REVERSAL":
+                    domain_reversals.append(r.to_reversal_domain(pay_id_str, inv_id_str))
+                else:
+                    domain_refunds.append(r.to_domain(pay_id_str, inv_id_str))
 
             # Run independent verifier inside the transaction
             verification_results = verify_proposals(
@@ -335,6 +650,8 @@ class ApprovalService:
                 payments=[domain_payment],
                 invoices=domain_invoices,
                 existing_allocations=domain_existing_allocs,
+                refunds=domain_refunds,
+                reversals=domain_reversals,
             )
 
             if not verification_results or not verification_results[0].passed:
@@ -344,25 +661,18 @@ class ApprovalService:
             # ------------------------------------------------------------------
             # STEP 5 & 6: Recalculate allocation amounts and check capacities
             # ------------------------------------------------------------------
-            # Calculate current payment allocations + provider settlements
-            stmt_curr_pay_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
-                AllocationRecord.tenant_id == tenant_id,
-                AllocationRecord.payment_id == payment.id,
-            )
-            stmt_curr_pay_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
-                ProviderSettlementRecord.tenant_id == tenant_id,
-                ProviderSettlementRecord.payment_id == payment.id,
-            )
-            current_pay_allocated = int(self.session.scalar(stmt_curr_pay_alloc) or 0) + int(self.session.scalar(stmt_curr_pay_sett) or 0)
+            pay_repo = PaymentRepository(self.session)
+            unapplied_cash = pay_repo.get_unapplied_cash_minor(tenant_id, payment.id)
             proposed_pay_total = sum(pa.amount_minor for pa in proposed_allocs)
 
-            if current_pay_allocated + proposed_pay_total > payment.amount_minor:
+            if proposed_pay_total > unapplied_cash:
                 raise LedgerConstraintError(
-                    f"Payment capacity exceeded (I2): payment amount {payment.amount_minor} minor units, "
-                    f"already allocated/settled {current_pay_allocated}, proposed {proposed_pay_total}"
+                    f"Payment capacity exceeded (I2): payment '{payment.provider_payment_id}' unapplied cash "
+                    f"{unapplied_cash} minor units, proposed {proposed_pay_total}"
                 )
 
             # Calculate capacity per invoice and ensure no duplicate provider settlement
+            inv_repo = InvoiceRepository(self.session)
             for pa in proposed_allocs:
                 inv = invoices_by_id[pa.invoice_id]
 
@@ -381,19 +691,11 @@ class ApprovalService:
                         f"already settled by provider."
                     )
 
-                stmt_curr_inv_alloc = select(func.coalesce(func.sum(AllocationRecord.amount_minor), 0)).where(
-                    AllocationRecord.tenant_id == tenant_id,
-                    AllocationRecord.invoice_id == inv.id,
-                )
-                stmt_curr_inv_sett = select(func.coalesce(func.sum(ProviderSettlementRecord.amount_minor), 0)).where(
-                    ProviderSettlementRecord.tenant_id == tenant_id,
-                    ProviderSettlementRecord.invoice_id == inv.id,
-                )
-                curr_inv_allocated = int(self.session.scalar(stmt_curr_inv_alloc) or 0) + int(self.session.scalar(stmt_curr_inv_sett) or 0)
-                if curr_inv_allocated + pa.amount_minor > inv.total_minor:
+                outstanding = inv_repo.get_ledger_outstanding_minor(tenant_id, inv.id)
+                if pa.amount_minor > outstanding:
                     raise LedgerConstraintError(
                         f"Invoice capacity exceeded (I3): invoice '{inv.provider_invoice_id}' total {inv.total_minor}, "
-                        f"already allocated/settled {curr_inv_allocated}, proposed {pa.amount_minor}"
+                        f"outstanding balance {outstanding}, proposed {pa.amount_minor}"
                     )
 
             # ------------------------------------------------------------------

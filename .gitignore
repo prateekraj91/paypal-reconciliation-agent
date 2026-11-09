@@ -12,3 +12,7 @@ __pycache__/
 .DS_Store
 *.egg-info/
 *.pdf
+node_modules/
+frontend/node_modules/
+.vite/
+*.tsbuildinfo

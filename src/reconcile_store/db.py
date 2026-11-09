@@ -58,9 +58,9 @@ def get_engine(config: Optional[DatabaseConfig] = None) -> Engine:
         return engine
 
     # PostgreSQL configuration
+    connect_args = {"prepare_threshold": 0} if cfg.is_postgres else {}
     if cfg.null_pool:
         from sqlalchemy.pool import NullPool
-        connect_args = {"prepare_threshold": 0} if cfg.is_postgres else {}
         return create_engine(
             cfg.url,
             echo=cfg.echo,
@@ -75,6 +75,7 @@ def get_engine(config: Optional[DatabaseConfig] = None) -> Engine:
         max_overflow=cfg.max_overflow,
         pool_timeout=cfg.pool_timeout,
         pool_pre_ping=True,  # Test connections before checkout
+        connect_args=connect_args,
     )
     return engine
 
