@@ -9,6 +9,8 @@ sends, as opposed to what the documentation implies.
 
 from __future__ import annotations
 
+import copy
+
 import json
 import pathlib
 
@@ -245,21 +247,23 @@ def test_the_real_appearance_delay_is_visible_in_the_response():
     )
 
 
-def test_the_real_transaction_maps_to_a_canonical_payment(client):
-    result = client.map_transactions(load("sandbox_transactions")["transaction_details"])
+def test_the_real_opening_balance_is_not_a_customer_payment(client):
+    details = load("sandbox_transactions")["transaction_details"]
+    result = client.map_transactions(details)
+    txn_id = details[0]["transaction_info"]["transaction_id"]
+    assert result.payments == ()
+    assert result.non_payment_ids == (txn_id,)
+    assert "T1900" in dict(result.skipped)[txn_id]
+
+
+def test_the_same_record_with_a_payment_event_code_still_maps(client):
+    item = copy.deepcopy(load("sandbox_transactions")["transaction_details"][0])
+    item["transaction_info"]["transaction_event_code"] = "T0006"
+    result = client.map_transactions([item])
     assert len(result.payments) == 1
-    payment = result.payments[0]
-    assert payment.payment_id
-    assert payment.currency == "USD"
-    assert payment.amount_cents > 0
-    assert payment.status is PaymentStatus.COMPLETED
-
-
-def test_the_real_balance_funding_carries_no_invoice_reference(client):
-    """It is not an invoice payment, so inventing a reference would be wrong."""
-    result = client.map_transactions(load("sandbox_transactions")["transaction_details"])
-    assert result.payments[0].reference is None
-    assert "Initial balance" in result.payments[0].note
+    assert result.payments[0].amount_cents > 0
+    assert result.payments[0].status is PaymentStatus.COMPLETED
+    assert result.non_payment_ids == ()
 
 
 def test_raw_evidence_is_kept_for_every_real_transaction(client):

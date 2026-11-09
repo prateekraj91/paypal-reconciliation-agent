@@ -18,6 +18,7 @@ from ..schema import PaymentRecord, AllocationRecord, ProviderRecord
 # The canonical payment is identified by the provider transaction id alone.
 SOURCE_UNSPECIFIED = "payment"
 SOURCE_TRANSACTION_SEARCH = "payment.transaction_search"
+RECORD_KIND_NON_PAYMENT_EVENT = "account_event.transaction_search"
 SOURCE_WEBHOOK_CAPTURE = "payment.webhook_capture"
 SOURCE_INVOICE_EMBEDDED = "payment.invoice_embedded"
 
