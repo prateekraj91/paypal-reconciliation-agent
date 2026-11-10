@@ -84,12 +84,12 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
   };
 
   const getEventTypeColor = (type: string) => {
-    if (type.includes('APPROVED')) return 'bg-emerald-950 text-emerald-400 border-emerald-800';
-    if (type.includes('REJECTED')) return 'bg-rose-950 text-rose-400 border-rose-800';
-    if (type.includes('INVESTIGATION')) return 'bg-cyan-950 text-cyan-400 border-cyan-800';
-    if (type.includes('PROPOSAL')) return 'bg-blue-950 text-blue-400 border-blue-800';
-    if (type.includes('ALLOCATION')) return 'bg-purple-950 text-purple-400 border-purple-800';
-    return 'bg-slate-900 text-slate-300 border-slate-800';
+    if (type.includes('APPROVED')) return 'bg-neutral-900 text-neutral-200 border-neutral-700';
+    if (type.includes('REJECTED')) return 'bg-neutral-900 text-neutral-200 border-neutral-700';
+    if (type.includes('INVESTIGATION')) return 'bg-neutral-900 text-neutral-200 border-neutral-700';
+    if (type.includes('PROPOSAL')) return 'bg-neutral-900 text-neutral-200 border-neutral-700';
+    if (type.includes('ALLOCATION')) return 'bg-neutral-900 text-neutral-200 border-neutral-700';
+    return 'bg-neutral-900 text-neutral-300 border-neutral-800';
   };
 
   return (
@@ -99,10 +99,10 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <Lock className="w-5 h-5 text-emerald-400" />
+            <Lock className="w-5 h-5 text-neutral-200" />
             Cryptographic Audit Trail
           </h1>
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-neutral-400">
             Immutable, SHA-256 hash-chained proof of all financial allocations and operator decisions.
           </p>
         </div>
@@ -111,7 +111,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
           <button
             onClick={loadData}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-slate-300 hover:text-white hover:bg-slate-800 text-sm transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-700 bg-neutral-900 text-neutral-300 hover:text-white hover:bg-neutral-800 text-sm transition-colors"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -120,7 +120,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
           <button
             onClick={handleVerify}
             disabled={verifying}
-            className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition-colors shadow-lg shadow-emerald-900/20"
+            className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-neutral-700 hover:bg-neutral-700 disabled:opacity-50 text-white text-sm font-medium transition-colors shadow-lg shadow-neutral-700/20"
           >
             {verifying ? (
               <>
@@ -142,15 +142,15 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
         <div
           className={`p-4 rounded-xl border ${
             verifyResult.verified
-              ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-              : 'bg-rose-950/40 border-rose-800/60 text-rose-300'
+              ? 'bg-neutral-900/40 border-neutral-700/60 text-neutral-200'
+              : 'bg-neutral-900/40 border-neutral-700/60 text-neutral-200'
           }`}
         >
           <div className="flex items-start gap-3">
             {verifyResult.verified ? (
-              <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
+              <CheckCircle2 className="w-6 h-6 text-neutral-200 flex-shrink-0 mt-0.5" />
             ) : (
-              <ShieldAlert className="w-6 h-6 text-rose-400 flex-shrink-0 mt-0.5" />
+              <ShieldAlert className="w-6 h-6 text-neutral-200 flex-shrink-0 mt-0.5" />
             )}
             <div className="flex-1 space-y-2">
               <div className="flex items-center justify-between">
@@ -169,16 +169,16 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
                   : verifyResult.error || verifyResult.message || 'The chain verification detected hash mismatch.'}
               </p>
               {verifyResult.verified && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2 text-xs font-mono text-slate-300 border-t border-emerald-800/40">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2 text-xs font-mono text-neutral-300 border-t border-neutral-700/40">
                   <div>
-                    <span className="text-slate-400">Genesis Hash: </span>
-                    <span className="text-emerald-400">
+                    <span className="text-neutral-400">Genesis Hash: </span>
+                    <span className="text-neutral-200">
                       {verifyResult.genesis_hash ? verifyResult.genesis_hash.slice(0, 24) + '...' : '0'.repeat(64)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-400">Latest Hash: </span>
-                    <span className="text-emerald-400">
+                    <span className="text-neutral-400">Latest Hash: </span>
+                    <span className="text-neutral-200">
                       {verifyResult.latest_hash ? verifyResult.latest_hash.slice(0, 24) + '...' : 'N/A'}
                     </span>
                   </div>
@@ -191,48 +191,48 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
 
       {/* Chain Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+        <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-wider text-slate-400">Total Audit Events</div>
+            <div className="text-xs uppercase tracking-wider text-neutral-400">Total Audit Events</div>
             <div className="text-2xl font-bold text-white mt-1">{totalCount}</div>
           </div>
-          <Layers className="w-8 h-8 text-blue-500/40" />
+          <Layers className="w-8 h-8 text-neutral-300/40" />
         </div>
-        <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+        <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-wider text-slate-400">Hash Algorithm</div>
-            <div className="text-xl font-bold font-mono text-emerald-400 mt-1">SHA-256 Chain</div>
+            <div className="text-xs uppercase tracking-wider text-neutral-400">Hash Algorithm</div>
+            <div className="text-xl font-bold font-mono text-neutral-200 mt-1">SHA-256 Chain</div>
           </div>
-          <Link2 className="w-8 h-8 text-emerald-500/40" />
+          <Link2 className="w-8 h-8 text-neutral-300/40" />
         </div>
-        <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+        <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-wider text-slate-400">Tenant Namespace</div>
-            <div className="text-lg font-bold font-mono text-purple-400 mt-1 truncate max-w-[200px]">
+            <div className="text-xs uppercase tracking-wider text-neutral-400">Tenant Namespace</div>
+            <div className="text-lg font-bold font-mono text-neutral-200 mt-1 truncate max-w-[200px]">
               {tenantId}
             </div>
           </div>
-          <Lock className="w-8 h-8 text-purple-500/40" />
+          <Lock className="w-8 h-8 text-neutral-300/40" />
         </div>
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 p-3 bg-slate-900/80 rounded-xl border border-slate-800">
+      <div className="flex flex-wrap items-center gap-3 p-3 bg-neutral-900/80 rounded-xl border border-neutral-800">
         <div className="relative flex-1 min-w-[220px]">
-          <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" />
+          <Search className="w-4 h-4 absolute left-3 top-2.5 text-neutral-400" />
           <input
             type="text"
             placeholder="Filter by Subject ID..."
             value={subjectIdFilter}
             onChange={(e) => setSubjectIdFilter(e.target.value)}
-            className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-blue-500 placeholder-slate-600"
+            className="w-full pl-9 pr-3 py-1.5 bg-black border border-neutral-800 rounded-lg text-sm text-neutral-200 focus:outline-none focus:border-neutral-400 placeholder-neutral-500"
           />
         </div>
 
         <select
           value={subjectTypeFilter}
           onChange={(e) => setSubjectTypeFilter(e.target.value)}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-slate-300 focus:outline-none focus:border-blue-500"
+          className="bg-black border border-neutral-800 rounded-lg px-3 py-1.5 text-sm text-neutral-300 focus:outline-none focus:border-neutral-400"
         >
           <option value="">All Subject Types</option>
           <option value="proposal">proposal</option>
@@ -245,7 +245,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
 
       {/* Events Table / Timeline */}
       {loading ? (
-        <div className="p-12 bg-slate-900/40 rounded-xl border border-slate-800">
+        <div className="p-12 bg-neutral-900/40 rounded-xl border border-neutral-800">
           <LoadingSpinner text="Retrieving cryptographic audit events..." />
         </div>
       ) : events.length === 0 ? (
@@ -264,23 +264,23 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
             return (
               <div
                 key={evt.id}
-                className="bg-slate-900/70 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden transition-all"
+                className="bg-neutral-900/70 border border-neutral-800 hover:border-neutral-700 rounded-xl overflow-hidden transition-all"
               >
                 {/* Row Header */}
                 <div
                   onClick={() => toggleExpand(evt.id)}
-                  className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer hover:bg-slate-800/40 transition-colors"
+                  className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer hover:bg-neutral-800/40 transition-colors"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <button className="text-slate-500 hover:text-white">
+                    <button className="text-neutral-400 hover:text-white">
                       {isExpanded ? (
-                        <ChevronDown className="w-4 h-4 text-slate-300" />
+                        <ChevronDown className="w-4 h-4 text-neutral-300" />
                       ) : (
-                        <ChevronRight className="w-4 h-4 text-slate-500" />
+                        <ChevronRight className="w-4 h-4 text-neutral-400" />
                       )}
                     </button>
 
-                    <div className="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center font-mono font-bold text-xs text-slate-300 border border-slate-700">
+                    <div className="w-8 h-8 rounded-lg bg-neutral-800 flex items-center justify-center font-mono font-bold text-xs text-neutral-300 border border-neutral-700">
                       #{evt.sequence_number}
                     </div>
 
@@ -293,13 +293,13 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
                         >
                           {evt.event_type}
                         </span>
-                        <span className="text-xs text-slate-400">
-                          by <strong className="text-slate-200">{evt.actor}</strong>
+                        <span className="text-xs text-neutral-400">
+                          by <strong className="text-neutral-200">{evt.actor}</strong>
                         </span>
                       </div>
-                      <div className="text-xs text-slate-500 mt-1 flex items-center gap-2">
+                      <div className="text-xs text-neutral-400 mt-1 flex items-center gap-2">
                         <span>Subject:</span>
-                        <span className="font-mono text-slate-300">
+                        <span className="font-mono text-neutral-300">
                           {evt.subject_type}:{evt.subject_id}
                         </span>
                       </div>
@@ -307,11 +307,11 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
                   </div>
 
                   <div className="flex flex-col md:items-end gap-1 flex-shrink-0">
-                    <div className="text-xs text-slate-400">
+                    <div className="text-xs text-neutral-400">
                       {evt.timestamp ? new Date(evt.timestamp).toLocaleString() : 'N/A'}
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-slate-500">Hash:</span>
+                      <span className="text-[11px] text-neutral-400">Hash:</span>
                       <HashBadge hash={evt.event_hash} />
                     </div>
                   </div>
@@ -319,24 +319,24 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
 
                 {/* Expanded Details */}
                 {isExpanded && (
-                  <div className="px-4 pb-4 pt-2 border-t border-slate-800/60 bg-slate-950/40 space-y-4">
+                  <div className="px-4 pb-4 pt-2 border-t border-neutral-800/60 bg-black/40 space-y-4">
                     {/* Hash Linkage */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-lg bg-neutral-900 border border-neutral-800 text-xs font-mono">
                       <div>
-                        <div className="text-slate-500 flex items-center gap-1.5 mb-1">
-                          <Link2 className="w-3.5 h-3.5 text-blue-400" />
+                        <div className="text-neutral-400 flex items-center gap-1.5 mb-1">
+                          <Link2 className="w-3.5 h-3.5 text-neutral-200" />
                           Previous Event Hash (Chain Link)
                         </div>
-                        <div className="text-slate-300 break-all bg-slate-950 p-2 rounded border border-slate-800">
+                        <div className="text-neutral-300 break-all bg-black p-2 rounded border border-neutral-800">
                           {evt.prev_hash || '0'.repeat(64) + ' (Genesis)'}
                         </div>
                       </div>
                       <div>
-                        <div className="text-slate-500 flex items-center gap-1.5 mb-1">
-                          <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                        <div className="text-neutral-400 flex items-center gap-1.5 mb-1">
+                          <Lock className="w-3.5 h-3.5 text-neutral-200" />
                           Canonical Event Hash (SHA-256)
                         </div>
-                        <div className="text-emerald-400 break-all bg-slate-950 p-2 rounded border border-slate-800">
+                        <div className="text-neutral-200 break-all bg-black p-2 rounded border border-neutral-800">
                           {evt.event_hash}
                         </div>
                       </div>
@@ -344,10 +344,10 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({ tenantId }) => {
 
                     {/* Payload JSON */}
                     <div>
-                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-neutral-400 mb-1.5">
                         Event Payload Details
                       </div>
-                      <pre className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300 overflow-x-auto">
+                      <pre className="p-3 rounded-lg bg-black border border-neutral-800 text-xs font-mono text-neutral-300 overflow-x-auto">
                         {JSON.stringify(evt.payload, null, 2)}
                       </pre>
                     </div>

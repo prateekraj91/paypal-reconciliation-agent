@@ -82,10 +82,10 @@ export function InvestigationsPage({
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-            <Sparkles size={20} className="text-violet-400" />
+            <Sparkles size={20} className="text-neutral-200" />
             AI Exception Investigations
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-neutral-400 mt-1">
             Grounded investigation of financial discrepancies using 12 read-only tools and independent verification.
           </p>
         </div>
@@ -100,7 +100,7 @@ export function InvestigationsPage({
           </button>
           <button
             onClick={() => setIsNewModalOpen(true)}
-            className="btn btn-primary text-xs flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600"
+            className="btn btn-primary text-xs flex items-center gap-2 bg-gradient-to-r from-neutral-700 to-neutral-700"
           >
             <Plus size={14} />
             <span>New Investigation</span>
@@ -109,7 +109,7 @@ export function InvestigationsPage({
       </div>
 
       {/* Status Filter Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+      <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
         {(['ALL', 'NEEDS_REVIEW', 'COMPLETED', 'INVALID'] as const).map((tab) => {
           const active = statusFilter === tab;
           return (
@@ -118,8 +118,8 @@ export function InvestigationsPage({
               onClick={() => setStatusFilter(tab)}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                 active
-                  ? 'bg-violet-600/20 text-violet-300 border border-violet-500/30'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+                  ? 'bg-neutral-700/20 text-neutral-200 border border-neutral-400/30'
+                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40'
               }`}
             >
               {tab === 'NEEDS_REVIEW'
@@ -165,23 +165,23 @@ export function InvestigationsPage({
                     className="cursor-pointer"
                   >
                     <td>
-                      <span className="font-mono text-xs font-semibold text-slate-300">{inv.id}</span>
-                      <span className="text-[10px] text-slate-500 block">
+                      <span className="font-mono text-xs font-semibold text-neutral-300">{inv.id}</span>
+                      <span className="text-[10px] text-neutral-400 block">
                         {inv.created_at ? new Date(inv.created_at).toLocaleString() : '-'}
                       </span>
                     </td>
                     <td>
-                      <span className="font-mono text-xs font-medium text-blue-400">{inv.target_id}</span>
-                      <span className="text-[10px] uppercase font-bold text-slate-500 block">{inv.target_type}</span>
+                      <span className="font-mono text-xs font-medium text-neutral-200">{inv.target_id}</span>
+                      <span className="text-[10px] uppercase font-bold text-neutral-400 block">{inv.target_type}</span>
                     </td>
                     <td>
-                      <span className="font-mono text-[11px] font-semibold text-violet-300 px-2 py-0.5 rounded bg-violet-950/50 border border-violet-800/40">
+                      <span className="font-mono text-[11px] font-semibold text-neutral-200 px-2 py-0.5 rounded bg-neutral-900/50 border border-neutral-700/40">
                         {inv.classification}
                       </span>
                     </td>
                     <td>
-                      <div className="text-xs text-slate-300 font-medium">{inv.model_name || 'qwen3:8b'}</div>
-                      <div className="text-[10px] text-slate-500 uppercase">{inv.model_provider || 'ollama'}</div>
+                      <div className="text-xs text-neutral-300 font-medium">{inv.model_name || 'qwen3:8b'}</div>
+                      <div className="text-[10px] text-neutral-400 uppercase">{inv.model_provider || 'ollama'}</div>
                     </td>
                     <td>
                       <VerifierStatusBadge status={inv.verifier_status} />
@@ -190,7 +190,7 @@ export function InvestigationsPage({
                       <StatusBadge status={inv.status} />
                     </td>
                     <td>
-                      <span className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium">
+                      <span className="text-xs text-neutral-200 hover:text-neutral-200 flex items-center gap-1 font-medium">
                         Inspect Case
                         <ArrowRight size={12} />
                       </span>

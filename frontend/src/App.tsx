@@ -94,8 +94,8 @@ export function App() {
           <div
             className={`fixed top-6 right-6 z-50 px-4 py-3 rounded-xl shadow-xl border text-sm font-medium transition-all ${
               notification.type === 'success'
-                ? 'bg-emerald-950 border-emerald-700 text-emerald-200 shadow-emerald-950/40'
-                : 'bg-rose-950 border-rose-700 text-rose-200 shadow-rose-950/40'
+                ? 'bg-neutral-900 border-neutral-500 text-neutral-100 shadow-neutral-700/40'
+                : 'bg-neutral-900 border-neutral-500 text-neutral-100 shadow-neutral-700/40'
             }`}
           >
             {notification.message}
@@ -124,8 +124,8 @@ export function App() {
         <div
           className={`fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-xl border text-sm font-medium transition-all ${
             notification.type === 'success'
-              ? 'bg-emerald-950 border-emerald-700 text-emerald-200 shadow-emerald-950/40'
-              : 'bg-rose-950 border-rose-700 text-rose-200 shadow-rose-950/40'
+              ? 'bg-neutral-900 border-neutral-500 text-neutral-100 shadow-neutral-700/40'
+              : 'bg-neutral-900 border-neutral-500 text-neutral-100 shadow-neutral-700/40'
           }`}
         >
           {notification.message}

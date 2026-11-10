@@ -423,26 +423,28 @@ export interface FactSectionPresentation {
 /** Model statements are only labelled verified once the independent verifier has accepted them. */
 export function getFactSectionPresentation(isInvalid: boolean): FactSectionPresentation {
   if (isInvalid) {
+    // Rejected: heavy solid white border, ✕ icon, inverted badge.
     return {
       heading: 'Unverified Model Claims',
       badge: 'Rejected by Verifier',
       emptyText: 'No model claims recorded.',
-      cardClass: 'border-red-950/60 bg-[#0e1726]',
-      dividerClass: 'border-red-900/40',
-      headingClass: 'text-red-400',
-      badgeClass: 'text-red-400',
-      rowClass: 'bg-red-950/20 border-red-500/20',
+      cardClass: 'border-2 border-solid border-white bg-[#111111]',
+      dividerClass: 'border-white',
+      headingClass: 'text-white',
+      badgeClass: 'bg-white text-black px-1.5 py-0.5 rounded font-extrabold',
+      rowClass: 'bg-black border-2 border-dashed border-neutral-400',
     };
   }
+  // Accepted: thin solid border, ✓ icon.
   return {
     heading: 'Verified Facts',
     badge: 'Grounded in DB Evidence',
     emptyText: 'No verified factual statements recorded.',
-    cardClass: 'border-emerald-950/60 bg-[#0e1726]',
-    dividerClass: 'border-emerald-900/40',
-    headingClass: 'text-emerald-400',
-    badgeClass: 'text-emerald-500',
-    rowClass: 'bg-emerald-950/20 border-emerald-500/20',
+    cardClass: 'border border-solid border-neutral-400 bg-[#111111]',
+    dividerClass: 'border-neutral-700',
+    headingClass: 'text-white',
+    badgeClass: 'text-neutral-200 border border-neutral-400 px-1.5 py-0.5 rounded',
+    rowClass: 'bg-black border border-solid border-neutral-600',
   };
 }
 
