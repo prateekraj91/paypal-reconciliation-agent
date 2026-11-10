@@ -4,23 +4,22 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Base styling for Fintech Operator Dashboard */
+/* Base styling for Fintech Operator Dashboard.
+ * Strictly monochrome: black, white and neutral greys only. Every safety state is
+ * distinguished by icon, label text, border weight/style and fill, never by hue. */
 
 :root {
-  --bg-main: #070a12;
-  --bg-surface: #0e1526;
-  --bg-card: #131d33;
-  --bg-hover: #1c2b4a;
-  --border-subtle: #1e293b;
-  --border-strong: #334155;
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent-blue: #3b82f6;
-  --accent-purple: #8b5cf6;
-  --accent-green: #10b981;
-  --accent-amber: #f59e0b;
-  --accent-red: #ef4444;
+  color-scheme: dark;
+  --bg-main: #000000;
+  --bg-surface: #0a0a0a;
+  --bg-card: #111111;
+  --bg-hover: #1f1f1f;
+  --border-subtle: #262626;
+  --border-strong: #404040;
+  --text-primary: #ffffff;
+  --text-secondary: #a3a3a3;
+  --text-muted: #858585; /* 5.6:1 on #000, 5.0:1 on #111 (WCAG AA) */
+  --focus-ring: #ffffff;
 }
 
 * {
@@ -81,40 +80,71 @@ code, .font-mono {
   white-space: nowrap;
 }
 
+/* Verified / accepted / reconciled / PAID: thin solid border, ✓ icon + label. */
 .badge-reconciled, .badge-verified, .badge-approved, .badge-completed, .badge-success {
-  background-color: rgba(16, 185, 129, 0.12);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
+  background-color: transparent;
+  color: #ffffff;
+  border: 1px solid #a3a3a3;
 }
 
+/* INVALID / fail-closed / rejected: inverted block, heavy solid white border, ✕ icon. */
 .badge-unmatched, .badge-invalid, .badge-rejected, .badge-danger, .badge-failed {
-  background-color: rgba(239, 68, 68, 0.12);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background-color: #ffffff;
+  color: #000000;
+  border: 2px solid #ffffff;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
+/* NEEDS_REVIEW / partial / pending / held: double border, ⚠ icon + label. */
 .badge-partial, .badge-needs-review, .badge-warning, .badge-pending, .badge-ambiguous {
-  background-color: rgba(245, 158, 11, 0.12);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background-color: #0a0a0a;
+  color: #ffffff;
+  border: 3px double #d4d4d4;
 }
 
 .badge-info, .badge-ai, .badge-settlement {
-  background-color: rgba(139, 92, 246, 0.12);
-  color: #a78bfa;
-  border: 1px solid rgba(139, 92, 246, 0.3);
+  background-color: #171717;
+  color: #e5e5e5;
+  border: 1px solid #525252;
 }
 
 .badge-refund, .badge-reversal {
-  background-color: rgba(244, 63, 94, 0.12);
-  color: #fb7185;
-  border: 1px solid rgba(244, 63, 94, 0.3);
+  background-color: #262626;
+  color: #ffffff;
+  border: 1px solid #858585;
+  font-style: italic;
 }
 
 .badge-neutral, .badge-payment {
-  background-color: rgba(148, 163, 184, 0.1);
-  color: #cbd5e1;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  background-color: transparent;
+  color: #d4d4d4;
+  border: 1px solid #404040;
+}
+
+/* Model-raised flags (advisory): dashed border, ⚠ icon, never presented as a verdict. */
+.state-advisory {
+  border: 2px dashed #d4d4d4;
+  background-color: #0a0a0a;
+}
+
+/* Some symbols (⛔, ⚡) only exist as colour emoji; render them in greyscale. */
+.glyph-mono {
+  filter: grayscale(1);
+}
+
+/* Fail-closed banner: the most dominant element on the page. */
+.state-fail-closed {
+  background-color: #ffffff;
+  color: #000000;
+  border: 4px solid #ffffff;
+  outline: 2px solid #000000;
+  outline-offset: -8px;
+}
+
+/* NEEDS_REVIEW / held surfaces. */
+.state-held {
+  border: 3px double #d4d4d4;
 }
 
 /* Tables */
@@ -183,7 +213,7 @@ code, .font-mono {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background-color: rgba(3, 7, 18, 0.75);
+  background-color: rgba(7, 7, 7, 0.75);
   backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
@@ -221,27 +251,37 @@ code, .font-mono {
 }
 
 .btn-primary {
-  background-color: var(--accent-blue);
-  color: white;
+  background-color: #ffffff;
+  color: #000000;
+  border-color: #ffffff;
+  font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) {
-  background-color: #2563eb;
+  background-color: #d4d4d4;
+  border-color: #d4d4d4;
 }
 
+/* Approve: solid white, the only filled action. */
 .btn-success {
-  background-color: var(--accent-green);
-  color: white;
+  background-color: #ffffff;
+  color: #000000;
+  border-color: #ffffff;
+  font-weight: 600;
 }
 .btn-success:hover:not(:disabled) {
-  background-color: #059669;
+  background-color: #d4d4d4;
+  border-color: #d4d4d4;
 }
 
+/* Reject: outlined so it never reads as the primary action. */
 .btn-danger {
-  background-color: var(--accent-red);
-  color: white;
+  background-color: #000000;
+  color: #ffffff;
+  border: 2px solid #ffffff;
+  font-weight: 600;
 }
 .btn-danger:hover:not(:disabled) {
-  background-color: #dc2626;
+  background-color: #262626;
 }
 
 .btn-secondary {
@@ -250,13 +290,20 @@ code, .font-mono {
   border-color: var(--border-strong);
 }
 .btn-secondary:hover:not(:disabled) {
-  background-color: var(--border-subtle);
+  background-color: var(--bg-hover);
+  border-color: #858585;
 }
 
-.btn:disabled {
-  opacity: 0.45;
+/* Disabled buttons must never look enabled: dark fill, grey text, dashed grey border. */
+.btn:disabled,
+.btn:disabled:hover {
+  background-color: #111111 !important;
+  color: #858585 !important;
+  border: 1px dashed #525252 !important;
+  opacity: 1;
   cursor: not-allowed;
-  filter: grayscale(0.5);
+  filter: none;
+  box-shadow: none;
 }
 
 /* Form inputs */
@@ -273,6 +320,17 @@ code, .font-mono {
 }
 
 .input-text:focus, .select-input:focus {
-  border-color: var(--accent-blue);
-  box-shadow: 0 0 0 1px var(--accent-blue);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+/* Keyboard focus: white ring everywhere. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+::selection {
+  background-color: #ffffff;
+  color: #000000;
 }
