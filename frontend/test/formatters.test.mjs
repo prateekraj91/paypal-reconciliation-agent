@@ -259,13 +259,16 @@ test('rejected investigations never present model claims as verified', () => {
   const styling = [invalid.cardClass, invalid.dividerClass, invalid.headingClass, invalid.badgeClass, invalid.rowClass].join(' ');
   assert.doesNotMatch(`${invalid.heading} ${invalid.badge} ${invalid.emptyText}`, /verified facts|grounded/i);
   assert.doesNotMatch(styling, /emerald|green/);
+  assert.match(invalid.cardClass, /border-2 border-solid border-white/);
+  assert.match(invalid.badgeClass, /bg-white text-black/);
 });
 
 test('accepted investigations keep the verified facts heading', () => {
   const accepted = getFactSectionPresentation(false);
   assert.strictEqual(accepted.heading, 'Verified Facts');
   assert.strictEqual(accepted.badge, 'Grounded in DB Evidence');
-  assert.match(accepted.headingClass, /emerald/);
+  assert.match(accepted.cardClass, /\bborder border-solid\b/);
+  assert.doesNotMatch(accepted.cardClass, /border-2|dashed|double/);
 });
 
 test('investigation page takes its fact heading from the verifier outcome', () => {
@@ -342,7 +345,7 @@ test('verifier verdict fails closed on any missing or failed verifier evidence',
 test('investigation page takes its banner only from the verifier verdict', () => {
   const page = readFileSync(new URL('../src/pages/InvestigationDetailPage.tsx', import.meta.url), 'utf8');
   assert.match(page, /const isInvalid = verdict\.verifierRejected;/);
-  assert.match(page, /\{isInvalid && \(\s*<div[^>]*>\s*<div[^>]*>\s*<ShieldAlert[^]*?Verifier Failed Closed/);
+  assert.match(page, /\{isInvalid && \(\s*<div[^>]*data-testid="fail-closed-banner"[^]*?Verifier Failed Closed/);
   assert.match(page, /Model-raised flags \(advisory\)/);
   assert.doesNotMatch(page, /BLOCKING_PATTERNS/);
   assert.match(page, /disabled=\{approvalBlocked \|\| isResolved\}/);

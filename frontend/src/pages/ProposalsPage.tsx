@@ -8,6 +8,7 @@ import {
   RefreshCw,
   ArrowRight,
   Filter,
+  Lock,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { ProposalItem, ProposalDetail } from '../types/api';
@@ -96,7 +97,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
               </span>
             )}
           </div>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-neutral-400 mt-1">
             Authoritative operator approval queue. Proposals require human sign-off before financial ledger mutation.
           </p>
         </div>
@@ -111,7 +112,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+      <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
         {(['PENDING', 'APPROVED', 'REJECTED', 'ALL'] as const).map((tab) => {
           const active = statusFilter === tab;
           return (
@@ -120,8 +121,8 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
               onClick={() => setStatusFilter(tab)}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                 active
-                  ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+                  ? 'bg-neutral-700/20 text-neutral-200 border border-neutral-400/30'
+                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40'
               }`}
             >
               {tab === 'PENDING' ? `Pending Review (${actionableCount} actionable)` : tab}
@@ -170,29 +171,29 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                   return (
                     <tr key={p.id}>
                       <td>
-                        <span className="font-mono text-xs text-slate-300 font-semibold">{p.id}</span>
-                        <span className="text-[10px] text-slate-500 font-mono block">Run: {p.run_id}</span>
+                        <span className="font-mono text-xs text-neutral-300 font-semibold">{p.id}</span>
+                        <span className="text-[10px] text-neutral-400 font-mono block">Run: {p.run_id}</span>
                       </td>
                       <td>
-                        <div className="font-mono text-xs text-blue-400 font-medium">
+                        <div className="font-mono text-xs text-neutral-200 font-medium">
                           {p.provider_payment_id}
                         </div>
-                        <div className="text-[11px] text-slate-400">{p.payer_name || 'Direct Remitter'}</div>
+                        <div className="text-[11px] text-neutral-400">{p.payer_name || 'Direct Remitter'}</div>
                         <MoneyDisplay
                           amountMinor={p.payment_amount_minor}
                           currency={p.payment_currency}
-                          className="text-xs text-slate-300 font-medium"
+                          className="text-xs text-neutral-300 font-medium"
                         />
                       </td>
                       <td>
                         {p.allocations.length === 0 ? (
-                          <span className="text-slate-500 text-xs italic">No allocation</span>
+                          <span className="text-neutral-400 text-xs italic">No allocation</span>
                         ) : (
                           <div className="space-y-1">
                             {p.allocations.map((a, idx) => (
                               <div key={idx} className="text-xs flex items-center justify-between gap-2">
-                                <span className="font-mono text-emerald-400 font-semibold">{a.invoice_number}</span>
-                                <MoneyDisplay amountMinor={a.amount_minor} currency={a.currency} className="text-slate-300 font-mono" />
+                                <span className="font-mono text-neutral-200 font-semibold">{a.invoice_number}</span>
+                                <MoneyDisplay amountMinor={a.amount_minor} currency={a.currency} className="text-neutral-300 font-mono" />
                               </div>
                             ))}
                           </div>
@@ -202,14 +203,17 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                         <div className="space-y-1">
                           {p.verifier_status === 'INVALID' || expl.badgeLabel === 'PROMPT_INJECTION_SUSPECT' ? (
                             <span className="badge badge-danger text-[11px] font-mono">
+                              <span aria-hidden="true">✕</span>
                               PROMPT_INJECTION_SUSPECT
                             </span>
                           ) : p.verifier_status === 'NEEDS_REVIEW' && !isEligible ? (
                             <span className="badge badge-warning text-[11px] font-mono">
+                              <span aria-hidden="true">⚠</span>
                               REMITTER MISMATCH
                             </span>
                           ) : isPending && p.outcome === 'PROPOSED' && !isEligible ? (
                             <span className="badge badge-warning text-[11px] font-mono">
+                              <span aria-hidden="true">⚠</span>
                               APPROVAL BLOCKED
                             </span>
                           ) : (
@@ -217,7 +221,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                               {expl.badgeLabel}
                             </span>
                           )}
-                          <p className="text-[11px] text-slate-400 leading-tight line-clamp-2">
+                          <p className="text-[11px] text-neutral-400 leading-tight line-clamp-2">
                             {p.approval_prohibited_reason || expl.summary}
                           </p>
                         </div>
@@ -232,7 +236,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             onClick={() => setSelectedForInspect(p)}
-                            className="btn btn-secondary py-1 px-2 text-[11px] text-slate-300 hover:text-white"
+                            className="btn btn-secondary py-1 px-2 text-[11px] text-neutral-300 hover:text-white"
                             title="Inspect matching signals, candidate invoices, and verifier checks"
                           >
                             Evidence
@@ -249,9 +253,12 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                               ) : (
                                 <button
                                   disabled
-                                  className="btn btn-secondary py-1 px-2.5 text-xs font-semibold opacity-50 cursor-not-allowed text-slate-400"
+                                  aria-disabled="true"
+                                  data-testid="approve-locked"
+                                  className="btn btn-secondary py-1 px-2.5 text-xs font-semibold cursor-not-allowed flex items-center gap-1"
                                   title={p.approval_prohibited_reason || "Approval prohibited by safety verifier"}
                                 >
+                                  <Lock size={11} aria-hidden="true" />
                                   Approve
                                 </button>
                               )}
@@ -264,7 +271,7 @@ export function ProposalsPage({ tenantId }: { tenantId: string }) {
                               </button>
                             </>
                           ) : (
-                            <span className="text-[11px] text-slate-500 italic pr-1">No action</span>
+                            <span className="text-[11px] text-neutral-400 italic pr-1">No action</span>
                           )}
                         </div>
                       </td>
