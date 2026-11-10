@@ -3,7 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 
-const TOKEN = 'jsFKPJcrpz1Ss8GhhsRjjzuZG4YSKkuytrTI4MGDXYs';
+const TOKEN = process.env.DEMO_ADMIN_API_KEY;
+if (!TOKEN || !TOKEN.trim()) {
+  throw new Error('DEMO_ADMIN_API_KEY environment variable is required.');
+}
 const RECORDING_DIR = '/tmp/demo_recording_raw';
 const OUTPUT_MP4 = path.resolve('paypal_reconciliation_demo.mp4');
 
