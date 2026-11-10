@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
+from sqlalchemy.engine import make_url
 
 from reconcile_store.approval import ApprovalService
 from reconcile_store.config import DatabaseConfig
@@ -48,11 +50,39 @@ class Outcome:
     pid_ready: threading.Event = field(default_factory=threading.Event)
 
 
+@contextmanager
+def _scratch_database(url: str):
+    """Create a throwaway database next to TEST_POSTGRESQL_URL and drop it afterwards.
+
+    init_schema() builds tables without Alembic's version table. Doing that in the
+    shared test database made later files that run `alembic upgrade head` fail with
+    "relation already exists", so these races run in a database of their own.
+    """
+    base = make_url(DatabaseConfig(url=url).url)
+    name = f"race_{os.urandom(6).hex()}"
+    admin = create_engine(base, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+        try:
+            yield base.set(database=name).render_as_string(hide_password=False)
+        finally:
+            with admin.connect() as conn:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+    finally:
+        admin.dispose()
+
+
 @pytest.fixture
 def race():
     url = os.environ.get("TEST_POSTGRESQL_URL")
     if not url:
         pytest.skip("TEST_POSTGRESQL_URL is not set")
+    with _scratch_database(url) as scratch_url:
+        yield from _race_setup(scratch_url)
+
+
+def _race_setup(url: str):
     engine = DatabaseEngine(DatabaseConfig(url=url))
     engine.init_schema()
     tenant = f"race_{os.urandom(6).hex()}"
