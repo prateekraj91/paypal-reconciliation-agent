@@ -115,7 +115,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-white">Reconciliation Runs</h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-neutral-400 mt-1">
             Deterministic matching passes producing proposed allocations with independent verifications.
           </p>
         </div>
@@ -142,7 +142,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Runs List */}
         <div className="lg:col-span-1 space-y-3">
-          <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
+          <h3 className="text-xs font-semibold uppercase text-neutral-400 tracking-wider">
             Run History ({runs.length})
           </h3>
 
@@ -165,23 +165,23 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                     onClick={() => openRunDetail(r.id)}
                     className={`p-3.5 rounded-lg border cursor-pointer transition-all ${
                       isSelected
-                        ? 'bg-blue-950/40 border-blue-500/60 shadow-[0_0_15px_rgba(59,130,246,0.15)]'
-                        : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                        ? 'bg-neutral-900/40 border-neutral-400/60 shadow-[0_0_15px_rgba(123,123,123,0.15)]'
+                        : 'bg-neutral-900/80 border-neutral-800 hover:border-neutral-700'
                     }`}
                   >
                     <div className="flex justify-between items-start">
-                      <span className="font-mono text-xs font-semibold text-blue-400">{r.id}</span>
+                      <span className="font-mono text-xs font-semibold text-neutral-200">{r.id}</span>
                       <span className="badge badge-reconciled text-[10px] py-0.5">COMPLETED</span>
                     </div>
 
-                    <div className="mt-2 space-y-1 text-xs text-slate-400">
+                    <div className="mt-2 space-y-1 text-xs text-neutral-400">
                       <div className="flex justify-between">
                         <span>Matcher:</span>
-                        <span className="font-mono text-slate-300 font-medium">{r.matcher_name}</span>
+                        <span className="font-mono text-neutral-300 font-medium">{r.matcher_name}</span>
                       </div>
                       <div className="flex justify-between">
                         <span>Executed:</span>
-                        <span className="font-mono text-slate-400 text-[11px]">
+                        <span className="font-mono text-neutral-400 text-[11px]">
                           {(() => {
                             const execTime = r.run_at || r.executed_at || r.created_at;
                             return execTime ? new Date(execTime).toLocaleString() : 'Completed';
@@ -199,11 +199,11 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
         {/* Selected Run Details & Generated Proposals */}
         <div className="lg:col-span-2 space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
+            <h3 className="text-xs font-semibold uppercase text-neutral-400 tracking-wider">
               {selectedRunId ? `Run Findings: ${selectedRunId}` : 'Run Proposals'}
             </h3>
             {runDetail?.total_proposals !== undefined && (
-              <span className="text-xs text-slate-400 font-mono">
+              <span className="text-xs text-neutral-400 font-mono">
                 {runDetail.total_proposals} Proposals Generated
               </span>
             )}
@@ -246,21 +246,21 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                       return (
                         <tr key={p.id}>
                           <td>
-                            <div className="font-mono text-xs text-blue-400 font-semibold">
+                            <div className="font-mono text-xs text-neutral-200 font-semibold">
                               {p.provider_payment_id}
                             </div>
-                            <div className="text-[11px] text-slate-400">{p.payer_name || 'Direct Remitter'}</div>
-                            <MoneyDisplay amountMinor={p.payment_amount_minor} currency={p.payment_currency} className="text-xs text-slate-300" />
+                            <div className="text-[11px] text-neutral-400">{p.payer_name || 'Direct Remitter'}</div>
+                            <MoneyDisplay amountMinor={p.payment_amount_minor} currency={p.payment_currency} className="text-xs text-neutral-300" />
                           </td>
                           <td>
                             {p.allocations.length === 0 ? (
-                              <span className="text-slate-500 text-xs italic">No invoice allocated</span>
+                              <span className="text-neutral-400 text-xs italic">No invoice allocated</span>
                             ) : (
                               <div className="space-y-1">
                                 {p.allocations.map((a, idx) => (
                                   <div key={idx} className="text-xs flex items-center justify-between gap-2">
-                                    <span className="font-mono text-emerald-400 font-medium">{a.invoice_number}</span>
-                                    <MoneyDisplay amountMinor={a.amount_minor} currency={a.currency} className="text-slate-300 font-medium" />
+                                    <span className="font-mono text-neutral-200 font-medium">{a.invoice_number}</span>
+                                    <MoneyDisplay amountMinor={a.amount_minor} currency={a.currency} className="text-neutral-300 font-medium" />
                                   </div>
                                 ))}
                               </div>
@@ -271,7 +271,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                               <span className="badge badge-info text-[10px] font-mono">
                                 {expl.badgeLabel}
                               </span>
-                              <p className="text-[11px] text-slate-400 leading-tight">
+                              <p className="text-[11px] text-neutral-400 leading-tight">
                                 {expl.summary}
                               </p>
                             </div>
@@ -301,7 +301,7 @@ export function ReconciliationPage({ tenantId }: { tenantId: string }) {
                                 </button>
                               </div>
                             ) : (
-                              <span className="text-[11px] text-slate-500 italic">Resolved</span>
+                              <span className="text-[11px] text-neutral-400 italic">Resolved</span>
                             )}
                           </td>
                         </tr>

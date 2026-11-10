@@ -70,9 +70,9 @@ export function InvestigationDetailPage({
 
   if (error || !inv) {
     return (
-      <div className="p-6 rounded-lg bg-red-950/20 border border-red-500/30 text-red-300 space-y-3">
+      <div className="p-6 rounded-lg bg-neutral-900/20 border border-neutral-400/30 text-neutral-200 space-y-3">
         <h3 className="font-semibold text-sm">Failed to load investigation</h3>
-        <p className="text-xs text-red-400">{error}</p>
+        <p className="text-xs text-neutral-200">{error}</p>
         <button onClick={onBack} className="btn btn-secondary text-xs">
           ← Return to Queue
         </button>
@@ -148,45 +148,45 @@ export function InvestigationDetailPage({
   return (
     <div className="space-y-6 animate-fade-in max-w-5xl mx-auto pb-16">
       {/* Back button and Meta Bar */}
-      <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+      <div className="flex items-center justify-between pb-4 border-b border-neutral-800">
         <button
           onClick={onBack}
-          className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors font-medium"
+          className="text-xs text-neutral-400 hover:text-white flex items-center gap-1.5 transition-colors font-medium"
         >
           <ArrowLeft size={14} />
           Back to AI Investigations
         </button>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400 font-mono">Case ID: {inv.id}</span>
+          <span className="text-xs text-neutral-400 font-mono">Case ID: {inv.id}</span>
           <StatusBadge status={inv.status} />
         </div>
       </div>
 
       {/* Target & Classification Banner */}
-      <div className="p-5 rounded-lg bg-slate-900 border border-slate-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+      <div className="p-5 rounded-lg bg-neutral-900 border border-neutral-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <span className="text-[11px] font-bold uppercase text-slate-500 tracking-wider">
+          <span className="text-[11px] font-bold uppercase text-neutral-400 tracking-wider">
             Investigated Target
           </span>
           <div className="flex items-baseline gap-2.5 mt-1">
             <span className="text-xl font-bold font-mono text-white">{inv.target_id}</span>
-            <span className="text-xs uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+            <span className="text-xs uppercase font-mono px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700">
               {inv.target_type}
             </span>
           </div>
           <div className="mt-2 flex items-center gap-2">
-            <span className="text-xs font-mono font-bold text-violet-300 px-2.5 py-0.5 rounded bg-violet-950/60 border border-violet-800/40">
+            <span className="text-xs font-mono font-bold text-neutral-200 px-2.5 py-0.5 rounded bg-neutral-900/60 border border-neutral-700/40">
               {inv.classification}
             </span>
-            <span className="text-xs text-slate-400">
-              Model: <strong className="text-slate-200">{inv.model_name || 'qwen3:8b'}</strong> ({inv.model_provider || 'ollama'})
+            <span className="text-xs text-neutral-400">
+              Model: <strong className="text-neutral-200">{inv.model_name || 'qwen3:8b'}</strong> ({inv.model_provider || 'ollama'})
             </span>
           </div>
         </div>
 
         {/* Verifier Badge in Header */}
         <div className="flex flex-col items-end gap-1.5">
-          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+          <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider">
             Safety Verifier Status
           </span>
           <VerifierStatusBadge status={inv.verifier_status} />
@@ -195,20 +195,25 @@ export function InvestigationDetailPage({
 
       {/* CRITICAL FAIL-CLOSED SAFETY WARNING (if INVALID) */}
       {isInvalid && (
-        <div className="p-4 rounded-lg bg-red-950/40 border-2 border-red-500/80 text-red-200 space-y-2 animate-fade-in shadow-[0_0_20px_rgba(239,68,68,0.2)]">
-          <div className="flex items-center gap-2 text-sm font-bold text-red-300">
-            <ShieldAlert size={18} className="text-red-400" />
+        <div
+          data-testid="fail-closed-banner"
+          role="alert"
+          className="state-fail-closed p-5 rounded-lg space-y-2.5 animate-fade-in"
+        >
+          <div className="flex items-center gap-2.5 text-base font-extrabold uppercase tracking-wide text-black">
+            <span aria-hidden="true" className="glyph-mono text-xl leading-none">⛔</span>
+            <XCircle size={20} strokeWidth={3} className="text-black shrink-0" />
             CRITICAL SAFETY ALERT: Independent Verifier Failed Closed (Verdict: INVALID)
           </div>
-          <p className="text-xs text-red-300/90 leading-relaxed">
+          <p className="text-xs text-black leading-relaxed font-medium">
             The independent safety verifier rejected this investigation (e.g. prompt injection, capacity violation, or currency mismatch detected).
             Per financial safety invariants, single-click approval and financial ledger mutations are <strong>strictly disabled</strong>.
           </p>
           {riskFlags.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1">
               {riskFlags.map((flag, idx) => (
-                <span key={idx} className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-red-900/60 border border-red-700 text-red-200">
-                  ⚠️ {flag}
+                <span key={idx} className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-black border-2 border-black text-white">
+                  ✕ {flag}
                 </span>
               ))}
             </div>
@@ -220,13 +225,14 @@ export function InvestigationDetailPage({
       {!isInvalid && verdict.modelRaisedFlags.length > 0 && (
         <div
           data-testid="model-raised-flags"
-          className="p-4 rounded-lg bg-amber-950/30 border border-amber-600/50 text-amber-200 space-y-2"
+          className="state-advisory p-4 rounded-lg text-neutral-100 space-y-2"
         >
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
-            <AlertTriangle size={14} className="text-amber-400" />
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white">
+            <span aria-hidden="true">⚠</span>
+            <AlertTriangle size={14} className="text-white" />
             Model-raised flags (advisory)
           </div>
-          <p className="text-xs text-amber-200/90 leading-relaxed">
+          <p className="text-xs text-neutral-100/90 leading-relaxed">
             The model raised these flags itself. They are not the verifier's verdict: the independent verifier
             accepted this investigation's facts and citations. A human should check each flag before deciding.
           </p>
@@ -234,9 +240,9 @@ export function InvestigationDetailPage({
             {verdict.modelRaisedFlags.map((flag, idx) => (
               <span
                 key={idx}
-                className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-amber-900/50 border border-amber-700 text-amber-100"
+                className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-black border border-dashed border-neutral-300 text-white"
               >
-                {flag}
+                ⚠ {flag}
               </span>
             ))}
           </div>
@@ -245,11 +251,11 @@ export function InvestigationDetailPage({
 
       {/* Executive Summary */}
       <div className="fintech-card space-y-2">
-        <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-2">
-          <FileText size={14} className="text-blue-400" />
+        <h3 className="text-xs font-bold uppercase text-neutral-400 tracking-wider flex items-center gap-2">
+          <FileText size={14} className="text-neutral-200" />
           Executive Summary
         </h3>
-        <p className="text-xs text-slate-200 leading-relaxed font-sans bg-slate-900/60 p-3.5 rounded-lg border border-slate-800/80">
+        <p className="text-xs text-neutral-200 leading-relaxed font-sans bg-neutral-900/60 p-3.5 rounded-lg border border-neutral-800/80">
           {inv.summary || result.executive_summary || 'No summary available.'}
         </p>
       </div>
@@ -267,7 +273,7 @@ export function InvestigationDetailPage({
         </div>
 
         {verifiedFacts.length === 0 ? (
-          <p className="text-xs text-slate-500 italic p-3">{factSection.emptyText}</p>
+          <p className="text-xs text-neutral-400 italic p-3">{factSection.emptyText}</p>
         ) : (
           <div className="space-y-2.5">
             {verifiedFacts.map((fact, idx) => (
@@ -276,7 +282,7 @@ export function InvestigationDetailPage({
                 className={`p-3 rounded-lg border space-y-1.5 ${factSection.rowClass}`}
               >
                 <div className="flex items-start justify-between gap-3 text-xs">
-                  <p className="text-slate-100 font-medium leading-relaxed">{fact.statement}</p>
+                  <p className="text-neutral-100 font-medium leading-relaxed">{fact.statement}</p>
                   {fact.amount_cents !== undefined && fact.amount_cents !== null && (
                     <MoneyDisplay
                       amountMinor={fact.amount_cents}
@@ -286,14 +292,14 @@ export function InvestigationDetailPage({
                   )}
                 </div>
                 {/* Cited Evidence IDs */}
-                <div className="flex items-center gap-1.5 pt-1 text-[11px] text-slate-400">
-                  <Database size={11} className="text-emerald-400" />
+                <div className="flex items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
+                  <Database size={11} className="text-neutral-200" />
                   <span className={`text-[10px] uppercase font-bold ${factSection.badgeClass}`}>Cited Evidence:</span>
                   <div className="flex flex-wrap gap-1">
                     {fact.evidence_ids.map((evId, evIdx) => (
                       <span
                         key={evIdx}
-                        className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-emerald-300"
+                        className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-200"
                       >
                         {evId}
                       </span>
@@ -307,46 +313,46 @@ export function InvestigationDetailPage({
       </div>
 
       {/* SECTION 2: HYPOTHESES (Unconfirmed Plausible Explanations) */}
-      <div className="fintech-card space-y-3 border-violet-950/60 bg-[#121429]">
-        <div className="flex items-center justify-between pb-2 border-b border-violet-900/40">
-          <h3 className="text-xs font-bold uppercase text-violet-300 tracking-wider flex items-center gap-2">
-            <Lightbulb size={14} className="text-violet-400" />
+      <div className="fintech-card space-y-3 border-neutral-700/60 bg-[#151515]">
+        <div className="flex items-center justify-between pb-2 border-b border-neutral-700/40">
+          <h3 className="text-xs font-bold uppercase text-neutral-200 tracking-wider flex items-center gap-2">
+            <Lightbulb size={14} className="text-neutral-200" />
             Hypotheses ({hypotheses.length})
           </h3>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800/50 uppercase font-bold">
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-900 text-neutral-200 border border-neutral-700/50 uppercase font-bold">
             Unconfirmed / Plausible
           </span>
         </div>
 
         {hypotheses.length === 0 ? (
-          <p className="text-xs text-slate-500 italic p-3">No active hypotheses formulated.</p>
+          <p className="text-xs text-neutral-400 italic p-3">No active hypotheses formulated.</p>
         ) : (
           <div className="space-y-2.5">
             {hypotheses.map((hyp) => (
               <div
                 key={hyp.hypothesis_id}
-                className="p-3 rounded-lg bg-violet-950/20 border border-violet-500/20 space-y-1.5"
+                className="p-3 rounded-lg bg-neutral-900/20 border border-neutral-400/20 space-y-1.5"
               >
                 <div className="flex items-start justify-between gap-3 text-xs">
-                  <p className="text-slate-200 leading-relaxed">{hyp.statement}</p>
+                  <p className="text-neutral-200 leading-relaxed">{hyp.statement}</p>
                   <span
                     className={`text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded shrink-0 ${
                       hyp.likelihood === 'HIGH'
-                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                        ? 'bg-neutral-900 text-neutral-200 border border-neutral-700'
                         : hyp.likelihood === 'MEDIUM'
-                        ? 'bg-amber-950 text-amber-400 border border-amber-800'
-                        : 'bg-slate-900 text-slate-400 border border-slate-700'
+                        ? 'bg-neutral-900 text-neutral-200 border border-neutral-700'
+                        : 'bg-neutral-900 text-neutral-400 border border-neutral-700'
                     }`}
                   >
                     Likelihood: {hyp.likelihood}
                   </span>
                 </div>
                 {hyp.supporting_evidence_ids.length > 0 && (
-                  <div className="flex items-center gap-1.5 pt-1 text-[11px] text-slate-400">
-                    <span className="text-[10px] uppercase font-bold text-violet-400">Supporting Evidence:</span>
+                  <div className="flex items-center gap-1.5 pt-1 text-[11px] text-neutral-400">
+                    <span className="text-[10px] uppercase font-bold text-neutral-200">Supporting Evidence:</span>
                     <div className="flex flex-wrap gap-1">
                       {hyp.supporting_evidence_ids.map((id, i) => (
-                        <span key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
+                        <span key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-300">
                           {id}
                         </span>
                       ))}
@@ -362,25 +368,25 @@ export function InvestigationDetailPage({
       {/* SECTION 3: CANDIDATE INVOICE ANALYSIS */}
       {candidates.length > 0 && (
         <div className="fintech-card space-y-3">
-          <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider">
+          <h3 className="text-xs font-bold uppercase text-neutral-400 tracking-wider">
             Candidate Invoices Evaluated ({candidates.length})
           </h3>
           <div className="space-y-2">
             {candidates.map((cand, idx) => (
-              <div key={idx} className="p-3.5 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2 text-xs">
+              <div key={idx} className="p-3.5 rounded-lg bg-neutral-900/80 border border-neutral-800 space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono font-bold text-blue-400">{cand.invoice_number}</span>
+                  <span className="font-mono font-bold text-neutral-200">{cand.invoice_number}</span>
                   {cand.score !== undefined && cand.score !== null && (
-                    <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/40">
+                    <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-neutral-900/60 text-neutral-200 border border-neutral-700/40">
                       Match Score: {cand.score}/100
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-4 text-[11px] text-slate-400">
-                  <span>Customer Match: {cand.customer_match ? '✅ Yes' : '❌ No'}</span>
-                  <span>Amount Match: {cand.amount_match ? '✅ Exact' : '❌ No'}</span>
+                <div className="flex items-center gap-4 text-[11px] text-neutral-400">
+                  <span>Customer Match: {cand.customer_match ? '✓ Yes' : '✕ No'}</span>
+                  <span>Amount Match: {cand.amount_match ? '✓ Exact' : '✕ No'}</span>
                 </div>
-                <p className="text-slate-300 text-xs bg-slate-950 p-2.5 rounded border border-slate-850">
+                <p className="text-neutral-300 text-xs bg-black p-2.5 rounded border border-neutral-900">
                   {cand.assessment}
                 </p>
               </div>
@@ -393,23 +399,23 @@ export function InvestigationDetailPage({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Missing Evidence */}
         <div className="fintech-card space-y-2.5">
-          <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
-            <HelpCircle size={14} className="text-amber-400" />
+          <h3 className="text-xs font-bold uppercase text-neutral-400 tracking-wider flex items-center gap-1.5">
+            <HelpCircle size={14} className="text-neutral-200" />
             Missing Information ({missingEvidence.length})
           </h3>
           {missingEvidence.length === 0 ? (
-            <p className="text-xs text-slate-500 italic p-3">Zero missing items identified.</p>
+            <p className="text-xs text-neutral-400 italic p-3">Zero missing items identified.</p>
           ) : (
             <div className="space-y-2">
               {missingEvidence.map((item, idx) => (
-                <div key={idx} className="p-2.5 rounded bg-slate-900 border border-slate-800 text-xs space-y-1">
+                <div key={idx} className="p-2.5 rounded bg-neutral-900 border border-neutral-800 text-xs space-y-1">
                   <div className="flex justify-between items-start">
-                    <span className="font-medium text-slate-200">{item.missing_item}</span>
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/40 uppercase">
+                    <span className="font-medium text-neutral-200">{item.missing_item}</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-900/80 text-neutral-200 border border-neutral-700/40 uppercase">
                       {item.importance}
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-400">{item.why_needed}</p>
+                  <p className="text-[11px] text-neutral-400">{item.why_needed}</p>
                 </div>
               ))}
             </div>
@@ -418,22 +424,22 @@ export function InvestigationDetailPage({
 
         {/* Recommended Operator Steps */}
         <div className="fintech-card space-y-2.5">
-          <h3 className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
-            <CheckCircle2 size={14} className="text-blue-400" />
+          <h3 className="text-xs font-bold uppercase text-neutral-400 tracking-wider flex items-center gap-1.5">
+            <CheckCircle2 size={14} className="text-neutral-200" />
             Recommended Investigation Steps ({recommendedSteps.length})
           </h3>
           {recommendedSteps.length === 0 ? (
-            <p className="text-xs text-slate-500 italic p-3">No further steps required.</p>
+            <p className="text-xs text-neutral-400 italic p-3">No further steps required.</p>
           ) : (
             <div className="space-y-2">
               {recommendedSteps.map((step) => (
-                <div key={step.step_number} className="p-2.5 rounded bg-slate-900 border border-slate-800 text-xs flex gap-2.5 items-start">
-                  <span className="w-5 h-5 rounded-full bg-blue-900/60 text-blue-300 border border-blue-700/50 flex items-center justify-center font-mono text-[10px] font-bold shrink-0 mt-0.5">
+                <div key={step.step_number} className="p-2.5 rounded bg-neutral-900 border border-neutral-800 text-xs flex gap-2.5 items-start">
+                  <span className="w-5 h-5 rounded-full bg-neutral-900/60 text-neutral-200 border border-neutral-500/50 flex items-center justify-center font-mono text-[10px] font-bold shrink-0 mt-0.5">
                     {step.step_number}
                   </span>
                   <div>
-                    <span className="font-semibold text-slate-200 block">{step.action}</span>
-                    <span className="text-[11px] text-slate-400">Target: {step.target} • {step.reason}</span>
+                    <span className="font-semibold text-neutral-200 block">{step.action}</span>
+                    <span className="text-[11px] text-neutral-400">Target: {step.target} • {step.reason}</span>
                   </div>
                 </div>
               ))}
@@ -443,10 +449,10 @@ export function InvestigationDetailPage({
       </div>
 
       {/* SECTION 5: SUGGESTED RESOLUTION & HUMAN DECISION ACTION BAR */}
-      <div className="p-6 rounded-lg bg-gradient-to-r from-slate-900 to-[#12192e] border-2 border-blue-500/40 space-y-4 shadow-xl">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-slate-800">
+      <div className="p-6 rounded-lg bg-gradient-to-r from-neutral-900 to-[#191919] border-2 border-neutral-400/40 space-y-4 shadow-xl">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-neutral-800">
           <div>
-            <span className="text-[10px] uppercase font-bold text-blue-400 tracking-wider">
+            <span className="text-[10px] uppercase font-bold text-neutral-200 tracking-wider">
               AI Suggested Resolution
             </span>
             <h3 className="text-base font-bold text-white mt-0.5">
@@ -455,21 +461,30 @@ export function InvestigationDetailPage({
           </div>
           {suggestedResolution && suggestedResolution.suggested_amount_cents && (
             <div className="text-right">
-              <span className="text-[10px] text-slate-400 block">Proposed Allocation Amount</span>
-              <MoneyDisplay amountMinor={suggestedResolution.suggested_amount_cents} className="text-lg font-bold text-emerald-400" />
+              <span className="text-[10px] text-neutral-400 block">Proposed Allocation Amount</span>
+              <MoneyDisplay amountMinor={suggestedResolution.suggested_amount_cents} className="text-lg font-bold text-neutral-200" />
             </div>
           )}
         </div>
 
         {suggestedResolution?.notes && (
-          <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/70 p-3 rounded border border-slate-800">
+          <p className="text-xs text-neutral-300 leading-relaxed bg-black/70 p-3 rounded border border-neutral-800">
             {suggestedResolution.notes}
           </p>
         )}
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
-          <span className="text-xs text-slate-400 font-mono">
+          <span
+            data-testid="approval-state"
+            className={`glyph-mono text-xs font-mono ${
+              isInvalid
+                ? 'uppercase font-extrabold bg-white text-black border-2 border-white px-2 py-1 rounded'
+                : approvalBlocked
+                ? 'font-semibold text-white border-[3px] border-double border-neutral-300 px-2 py-1 rounded'
+                : 'text-neutral-400'
+            }`}
+          >
             {isInvalid
               ? '⛔ Approval strictly blocked by safety verifier'
               : approvalBlocked
@@ -510,15 +525,15 @@ export function InvestigationDetailPage({
         maxWidth="max-w-2xl"
       >
         <form onSubmit={handleApprove} className="space-y-4">
-          <div className="p-3 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-xs text-emerald-300 leading-relaxed">
+          <div className="p-3 rounded-lg bg-neutral-900/30 border border-neutral-400/30 text-xs text-neutral-200 leading-relaxed">
             Approving this investigation links to the verified deterministic proposal and executes the 10-step atomic allocation via <strong>ApprovalService</strong>.
           </div>
 
           {/* Allocation Distribution Table */}
-          <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center justify-between">
+          <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-neutral-300 flex items-center justify-between">
               <span>Proposed Allocation Distribution</span>
-              <span className="font-mono text-emerald-400">
+              <span className="font-mono text-neutral-200">
                 Target: {inv.target_type}:{inv.target_id}
               </span>
             </div>
@@ -526,37 +541,37 @@ export function InvestigationDetailPage({
             {allocDistribution.length > 0 ? (
               <table className="w-full text-xs font-mono text-left">
                 <thead>
-                  <tr className="border-b border-slate-800 text-slate-400">
+                  <tr className="border-b border-neutral-800 text-neutral-400">
                     <th className="py-1.5 font-medium">Target Invoice</th>
                     <th className="py-1.5 font-medium">Allocation Amount</th>
                     <th className="py-1.5 font-medium text-right">Currency</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/60">
+                <tbody className="divide-y divide-neutral-800/60">
                   {allocDistribution.map((a, idx) => (
-                    <tr key={idx} className="text-slate-200">
+                    <tr key={idx} className="text-neutral-200">
                       <td className="py-2">{a.invoiceId}</td>
-                      <td className="py-2 text-emerald-400">
+                      <td className="py-2 text-neutral-200">
                         <MoneyDisplay amountMinor={a.amountMinor} currency={a.currency} />
                       </td>
-                      <td className="py-2 text-right text-slate-400">{a.currency}</td>
+                      <td className="py-2 text-right text-neutral-400">{a.currency}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
-              <div className="text-xs text-rose-400">
+              <div className="text-xs text-neutral-200">
                 Warning: No structured allocations detected in the recommendation.
               </div>
             )}
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center justify-between">
+            <label className="block text-xs font-medium text-neutral-300 mb-1 flex items-center justify-between">
               <span>
-                Approving Operator Identity <span className="text-red-400">*</span>
+                Approving Operator Identity <span className="text-neutral-200">*</span>
               </span>
-              <span className="text-[10px] text-slate-500 font-normal">
+              <span className="text-[10px] text-neutral-400 font-normal">
                 Self-reported for local demo audit
               </span>
             </label>
@@ -568,13 +583,13 @@ export function InvestigationDetailPage({
               className="input-text text-xs"
               placeholder="e.g. controller.sarah@demo.com"
             />
-            <p className="text-[11px] text-slate-500 mt-1">
+            <p className="text-[11px] text-neutral-400 mt-1">
               Local Operator Notice: Operator identity is recorded in the SHA-256 audit log for local accountability and does not represent authenticated multi-user RBAC.
             </p>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">
+            <label className="block text-xs font-medium text-neutral-300 mb-1">
               Audit Notes
             </label>
             <textarea
@@ -586,7 +601,7 @@ export function InvestigationDetailPage({
             />
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+          <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
             <button type="button" onClick={() => setIsApproveOpen(false)} disabled={isSubmitting} className="btn btn-secondary text-xs">
               Cancel
             </button>
@@ -609,13 +624,13 @@ export function InvestigationDetailPage({
         subtitle={`Case ID: ${inv.id}`}
       >
         <form onSubmit={handleReject} className="space-y-4">
-          <div className="p-3.5 rounded-lg bg-red-950/30 border border-red-500/30 text-xs text-red-300 leading-relaxed">
+          <div className="p-3.5 rounded-lg bg-neutral-900/30 border border-neutral-400/30 text-xs text-neutral-200 leading-relaxed">
             Rejecting this recommendation records an immutable audit event and closes the investigation without financial mutation.
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">
-              Operator Name / Email <span className="text-red-400">*</span>
+            <label className="block text-xs font-medium text-neutral-300 mb-1">
+              Operator Name / Email <span className="text-neutral-200">*</span>
             </label>
             <input
               type="text"
@@ -627,8 +642,8 @@ export function InvestigationDetailPage({
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">
-              Rejection Reason & Next Steps <span className="text-red-400">*</span>
+            <label className="block text-xs font-medium text-neutral-300 mb-1">
+              Rejection Reason & Next Steps <span className="text-neutral-200">*</span>
             </label>
             <textarea
               required
@@ -639,7 +654,7 @@ export function InvestigationDetailPage({
             />
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+          <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
             <button type="button" onClick={() => setIsRejectOpen(false)} disabled={isSubmitting} className="btn btn-secondary text-xs">
               Cancel
             </button>

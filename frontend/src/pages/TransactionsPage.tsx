@@ -92,7 +92,7 @@ export function TransactionsPage({
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-white">Financial Transactions</h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-neutral-400 mt-1">
             Authoritative cash receipts, ledger allocations, and unapplied cash tracking.
           </p>
         </div>
@@ -109,15 +109,15 @@ export function TransactionsPage({
       </div>
 
       {/* Search and Filters Bar */}
-      <div className="p-4 rounded-lg bg-[#0e1526] border border-slate-800 flex flex-wrap items-center gap-3">
+      <div className="p-4 rounded-lg bg-[#151515] border border-neutral-800 flex flex-wrap items-center gap-3">
         <form onSubmit={handleSearchSubmit} className="flex-1 min-w-[220px] relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by Payment ID, Payer, Email, or Reference..."
-            className="input-text text-xs pl-8 bg-slate-900 border-slate-700"
+            className="input-text text-xs pl-8 bg-neutral-900 border-neutral-700"
           />
         </form>
 
@@ -125,7 +125,7 @@ export function TransactionsPage({
           <select
             value={recordTypeFilter}
             onChange={(e) => setRecordTypeFilter(e.target.value)}
-            className="select-input text-xs w-auto py-2 bg-slate-900 border-slate-700"
+            className="select-input text-xs w-auto py-2 bg-neutral-900 border-neutral-700"
           >
             <option value="ALL">All Record Types</option>
             <option value="PAYMENT">Payments Only</option>
@@ -136,7 +136,7 @@ export function TransactionsPage({
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="select-input text-xs w-auto py-2 bg-slate-900 border-slate-700"
+            className="select-input text-xs w-auto py-2 bg-neutral-900 border-neutral-700"
           >
             <option value="ALL">All Reconciliation Statuses</option>
             <option value="RECONCILED">Reconciled (Zero Unapplied)</option>
@@ -147,7 +147,7 @@ export function TransactionsPage({
           <select
             value={currencyFilter}
             onChange={(e) => setCurrencyFilter(e.target.value)}
-            className="select-input text-xs w-auto py-2 bg-slate-900 border-slate-700"
+            className="select-input text-xs w-auto py-2 bg-neutral-900 border-neutral-700"
           >
             <option value="ALL">All Currencies</option>
             <option value="USD">USD ($)</option>
@@ -195,19 +195,19 @@ export function TransactionsPage({
                       <RecordTypeBadge recordType={tx.record_type || 'PAYMENT'} />
                     </td>
                     <td className="whitespace-nowrap">
-                      <span className="font-mono text-xs text-blue-400 font-medium">
+                      <span className="font-mono text-xs text-neutral-200 font-medium">
                         {tx.provider_payment_id}
                       </span>
                     </td>
                     <td>
-                      <div className="text-xs font-medium text-slate-200">
+                      <div className="text-xs font-medium text-neutral-200">
                         {tx.payer_name || 'Anonymous Remitter'}
                       </div>
                       {tx.payer_email && (
-                        <div className="text-[11px] text-slate-500 font-mono">{tx.payer_email}</div>
+                        <div className="text-[11px] text-neutral-400 font-mono">{tx.payer_email}</div>
                       )}
                     </td>
-                    <td className="text-xs text-slate-400 font-mono hidden xl:table-cell whitespace-nowrap">
+                    <td className="text-xs text-neutral-400 font-mono hidden xl:table-cell whitespace-nowrap">
                       {tx.received_at ? new Date(tx.received_at).toLocaleDateString() : '-'}
                     </td>
                     <td className="whitespace-nowrap text-right pr-3">
@@ -226,8 +226,8 @@ export function TransactionsPage({
                         currency={tx.currency}
                         className={
                           tx.net_amount_minor !== undefined && tx.net_amount_minor !== tx.amount_minor
-                            ? 'font-semibold text-amber-300'
-                            : 'text-slate-300'
+                            ? 'font-semibold text-neutral-200'
+                            : 'text-neutral-300'
                         }
                       />
                     </td>
@@ -236,10 +236,10 @@ export function TransactionsPage({
                         <MoneyDisplay
                           amountMinor={tx.unapplied_cash_minor}
                           currency={tx.currency}
-                          className="text-amber-400 font-semibold"
+                          className="text-neutral-200 font-semibold"
                         />
                       ) : (
-                        <span className="text-slate-500 text-xs font-mono">$0.00</span>
+                        <span className="text-neutral-400 text-xs font-mono">$0.00</span>
                       )}
                     </td>
                     <td className="whitespace-nowrap">
@@ -249,7 +249,7 @@ export function TransactionsPage({
                       {tx.unapplied_cash_minor > 0 && (
                         <button
                           onClick={() => onStartInvestigation(tx.provider_payment_id)}
-                          className="btn btn-secondary py-1 px-2.5 text-[11px] text-violet-300 border-violet-800/40 hover:bg-violet-950/40 inline-flex items-center gap-1.5"
+                          className="btn btn-secondary py-1 px-2.5 text-[11px] text-neutral-200 border-neutral-700/40 hover:bg-neutral-900/40 inline-flex items-center gap-1.5"
                         >
                           <Sparkles size={11} />
                           Investigate
@@ -271,14 +271,14 @@ export function TransactionsPage({
           onClick={() => setSelectedTxId(null)}
         >
           <div
-            className="w-full max-w-2xl bg-[#0c1222] border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl"
+            className="w-full max-w-2xl bg-[#121212] border-l border-neutral-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Drawer Header */}
-            <div className="flex items-start justify-between pb-4 border-b border-slate-800">
+            <div className="flex items-start justify-between pb-4 border-b border-neutral-800">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                  <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider">
                     Transaction Detail
                   </span>
                   {detail && <RecordTypeBadge recordType={detail.record_type || 'PAYMENT'} />}
@@ -289,7 +289,7 @@ export function TransactionsPage({
               </div>
               <button
                 onClick={() => setSelectedTxId(null)}
-                className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800"
+                className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800"
               >
                 <X size={18} />
               </button>
@@ -300,21 +300,21 @@ export function TransactionsPage({
             ) : (
               <div className="space-y-6">
                 {/* Status & Unapplied Cash Banner */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 rounded-lg bg-slate-900 border border-slate-800">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 rounded-lg bg-neutral-900 border border-neutral-800">
                   <div>
-                    <span className="text-[11px] text-slate-400 block mb-1">Reconciliation Status</span>
+                    <span className="text-[11px] text-neutral-400 block mb-1">Reconciliation Status</span>
                     <StatusBadge status={detail.reconciliation_status || 'UNMATCHED'} />
                   </div>
                   <div>
-                    <span className="text-[11px] text-slate-400 block mb-1">Unapplied Cash</span>
+                    <span className="text-[11px] text-neutral-400 block mb-1">Unapplied Cash</span>
                     <MoneyDisplay
                       amountMinor={detail.unapplied_cash_minor}
                       currency={detail.currency}
-                      className={detail.unapplied_cash_minor > 0 ? 'text-amber-400 text-sm font-semibold' : 'text-slate-400 text-sm'}
+                      className={detail.unapplied_cash_minor > 0 ? 'text-neutral-200 text-sm font-semibold' : 'text-neutral-400 text-sm'}
                     />
                   </div>
                   <div>
-                    <span className="text-[11px] text-slate-400 block mb-1">Gross Ingested</span>
+                    <span className="text-[11px] text-neutral-400 block mb-1">Gross Ingested</span>
                     <MoneyDisplay
                       amountMinor={
                         detail.record_type === 'REFUND' || detail.record_type === 'REVERSAL'
@@ -322,77 +322,77 @@ export function TransactionsPage({
                           : detail.amount_minor
                       }
                       currency={detail.currency}
-                      className="text-slate-200 text-sm"
+                      className="text-neutral-200 text-sm"
                     />
                   </div>
                   <div>
-                    <span className="text-[11px] text-slate-400 block mb-1">Net Balance</span>
+                    <span className="text-[11px] text-neutral-400 block mb-1">Net Balance</span>
                     <MoneyDisplay
                       amountMinor={detail.net_amount_minor ?? detail.amount_minor}
                       currency={detail.currency}
-                      className="text-emerald-400 text-sm font-semibold"
+                      className="text-neutral-200 text-sm font-semibold"
                     />
                   </div>
                 </div>
 
                 {((detail.refund_amount_minor ?? 0) > 0 || (detail.reversal_amount_minor ?? 0) > 0) && (
-                  <div className="p-3.5 rounded-lg bg-slate-900/60 border border-slate-800 space-y-1.5 text-xs">
-                    <span className="font-semibold text-slate-300 uppercase tracking-wider text-[10px] block">
+                  <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1.5 text-xs">
+                    <span className="font-semibold text-neutral-300 uppercase tracking-wider text-[10px] block">
                       Refund & Reversal Accounting Breakdown
                     </span>
-                    <div className="flex justify-between text-slate-300">
-                      <span className="text-slate-400">Gross Payment:</span>
+                    <div className="flex justify-between text-neutral-300">
+                      <span className="text-neutral-400">Gross Payment:</span>
                       <MoneyDisplay amountMinor={detail.amount_minor} currency={detail.currency} />
                     </div>
                     {(detail.refund_amount_minor ?? 0) > 0 && (
-                      <div className="flex justify-between text-rose-400">
+                      <div className="flex justify-between text-neutral-200">
                         <span>Associated Refund:</span>
-                        <span>-<MoneyDisplay amountMinor={detail.refund_amount_minor!} currency={detail.currency} className="inline text-rose-400" /></span>
+                        <span>-<MoneyDisplay amountMinor={detail.refund_amount_minor!} currency={detail.currency} className="inline text-neutral-200" /></span>
                       </div>
                     )}
                     {(detail.reversal_amount_minor ?? 0) > 0 && (
-                      <div className="flex justify-between text-rose-400">
+                      <div className="flex justify-between text-neutral-200">
                         <span>Dispute Reversal:</span>
-                        <span>-<MoneyDisplay amountMinor={detail.reversal_amount_minor!} currency={detail.currency} className="inline text-rose-400" /></span>
+                        <span>-<MoneyDisplay amountMinor={detail.reversal_amount_minor!} currency={detail.currency} className="inline text-neutral-200" /></span>
                       </div>
                     )}
-                    <div className="flex justify-between text-emerald-400 font-semibold pt-1 border-t border-slate-800">
+                    <div className="flex justify-between text-neutral-200 font-semibold pt-1 border-t border-neutral-800">
                       <span>Net Available Cash:</span>
-                      <MoneyDisplay amountMinor={detail.net_amount_minor ?? 0} currency={detail.currency} className="text-emerald-400" />
+                      <MoneyDisplay amountMinor={detail.net_amount_minor ?? 0} currency={detail.currency} className="text-neutral-200" />
                     </div>
                   </div>
                 )}
 
                 {/* Core Attributes */}
                 <div className="space-y-2 text-xs">
-                  <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px]">
+                  <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">
                     Payment Details
                   </h4>
-                  <div className="p-3.5 rounded-lg bg-slate-900/60 border border-slate-800/80 space-y-2">
+                  <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800/80 space-y-2">
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Record Type:</span>
-                      <span className="text-slate-200 font-mono font-medium">{detail.record_type || 'PAYMENT'}</span>
+                      <span className="text-neutral-400">Record Type:</span>
+                      <span className="text-neutral-200 font-mono font-medium">{detail.record_type || 'PAYMENT'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Payer Name:</span>
-                      <span className="text-slate-200 font-medium">{detail.payer_name || '-'}</span>
+                      <span className="text-neutral-400">Payer Name:</span>
+                      <span className="text-neutral-200 font-medium">{detail.payer_name || '-'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Payer Email:</span>
-                      <span className="text-slate-200 font-mono">{detail.payer_email || '-'}</span>
+                      <span className="text-neutral-400">Payer Email:</span>
+                      <span className="text-neutral-200 font-mono">{detail.payer_email || '-'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Reference:</span>
-                      <span className="text-slate-200 font-mono">{detail.reference || '-'}</span>
+                      <span className="text-neutral-400">Reference:</span>
+                      <span className="text-neutral-200 font-mono">{detail.reference || '-'}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500">Received At:</span>
-                      <span className="text-slate-200 font-mono">{detail.received_at || '-'}</span>
+                      <span className="text-neutral-400">Received At:</span>
+                      <span className="text-neutral-200 font-mono">{detail.received_at || '-'}</span>
                     </div>
                     {detail.note && (
-                      <div className="pt-2 border-t border-slate-800 text-slate-400">
-                        <span className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Memo / Note:</span>
-                        <p className="p-2 rounded bg-slate-950 font-mono text-[11px] text-slate-300 break-words">
+                      <div className="pt-2 border-t border-neutral-800 text-neutral-400">
+                        <span className="text-[10px] uppercase font-bold text-neutral-400 block mb-1">Memo / Note:</span>
+                        <p className="p-2 rounded bg-black font-mono text-[11px] text-neutral-300 break-words">
                           {detail.note}
                         </p>
                       </div>
@@ -403,13 +403,13 @@ export function TransactionsPage({
                 {/* Dedicated Associated Refunds & Disputes Section */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                      <FileText size={12} className="text-rose-400" />
+                    <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                      <FileText size={12} className="text-neutral-200" />
                       Associated Refunds & Disputes ({detail.refunds ? detail.refunds.length : 0})
                     </h4>
                   </div>
                   {(!detail.refunds || detail.refunds.length === 0) ? (
-                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                    <p className="text-xs text-neutral-400 italic p-3 bg-neutral-900/40 rounded border border-neutral-800/60">
                       Zero associated refunds or chargeback disputes for this transaction.
                     </p>
                   ) : (
@@ -417,24 +417,24 @@ export function TransactionsPage({
                       {detail.refunds.map((ref) => (
                         <div
                           key={ref.id}
-                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center text-xs"
+                          className="p-3 rounded-lg bg-neutral-900/90 border border-neutral-800 flex justify-between items-center text-xs"
                         >
                           <div>
                             <div className="flex items-center gap-2">
                               <RecordTypeBadge recordType={ref.record_type || 'REFUND'} />
-                              <span className="font-mono text-rose-300 font-medium">{ref.provider_refund_id}</span>
+                              <span className="font-mono text-neutral-200 font-medium">{ref.provider_refund_id}</span>
                             </div>
                             {ref.reason && (
-                              <span className="text-[11px] text-slate-400 block mt-1">{ref.reason}</span>
+                              <span className="text-[11px] text-neutral-400 block mt-1">{ref.reason}</span>
                             )}
                             {ref.dispute_id && (
-                              <span className="text-[11px] text-amber-400 font-mono block mt-0.5">Dispute Case: {ref.dispute_id}</span>
+                              <span className="text-[11px] text-neutral-200 font-mono block mt-0.5">Dispute Case: {ref.dispute_id}</span>
                             )}
-                            <span className="text-[10px] text-slate-500 block mt-0.5">
+                            <span className="text-[10px] text-neutral-400 block mt-0.5">
                               Processed {ref.refunded_at ? new Date(ref.refunded_at).toLocaleDateString() : '-'}
                             </span>
                           </div>
-                          <MoneyDisplay amountMinor={-Math.abs(ref.amount_minor)} currency={ref.currency} className="text-rose-400 font-bold" />
+                          <MoneyDisplay amountMinor={-Math.abs(ref.amount_minor)} currency={ref.currency} className="text-neutral-200 font-bold" />
                         </div>
                       ))}
                     </div>
@@ -444,13 +444,13 @@ export function TransactionsPage({
                 {/* Dedicated Settlement Batch References Section */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                      <Clock size={12} className="text-violet-400" />
+                    <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                      <Clock size={12} className="text-neutral-200" />
                       Settlement Batch References ({detail.settlements ? detail.settlements.length : 0})
                     </h4>
                   </div>
                   {(!detail.settlements || detail.settlements.length === 0) ? (
-                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                    <p className="text-xs text-neutral-400 italic p-3 bg-neutral-900/40 rounded border border-neutral-800/60">
                       Zero settlement batch events recorded for this transaction.
                     </p>
                   ) : (
@@ -458,19 +458,19 @@ export function TransactionsPage({
                       {detail.settlements.map((st) => (
                         <div
                           key={st.id}
-                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center text-xs"
+                          className="p-3 rounded-lg bg-neutral-900/90 border border-neutral-800 flex justify-between items-center text-xs"
                         >
                           <div>
                             <div className="flex items-center gap-2">
                               <RecordTypeBadge recordType="SETTLEMENT" />
-                              <span className="font-mono text-violet-300 font-medium">{st.provider_settlement_id}</span>
+                              <span className="font-mono text-neutral-200 font-medium">{st.provider_settlement_id}</span>
                             </div>
-                            <span className="text-[11px] text-slate-400 block mt-1">Invoice: {st.invoice_number}</span>
-                            <span className="text-[10px] text-slate-500 block mt-0.5">
+                            <span className="text-[11px] text-neutral-400 block mt-1">Invoice: {st.invoice_number}</span>
+                            <span className="text-[10px] text-neutral-400 block mt-0.5">
                               Settled {st.settled_at ? new Date(st.settled_at).toLocaleDateString() : '-'}
                             </span>
                           </div>
-                          <MoneyDisplay amountMinor={st.amount_minor} currency={st.currency} className="text-violet-300 font-semibold" />
+                          <MoneyDisplay amountMinor={st.amount_minor} currency={st.currency} className="text-neutral-200 font-semibold" />
                         </div>
                       ))}
                     </div>
@@ -480,12 +480,12 @@ export function TransactionsPage({
                 {/* Approved Allocations */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px]">
+                    <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px]">
                       Approved Application Allocations ({detail.allocations.length})
                     </h4>
                   </div>
                   {detail.allocations.length === 0 ? (
-                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                    <p className="text-xs text-neutral-400 italic p-3 bg-neutral-900/40 rounded border border-neutral-800/60">
                       Zero application allocations approved yet.
                     </p>
                   ) : (
@@ -493,15 +493,15 @@ export function TransactionsPage({
                       {detail.allocations.map((alloc) => (
                         <div
                           key={alloc.id}
-                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex justify-between items-center text-xs"
+                          className="p-3 rounded-lg bg-neutral-900/90 border border-neutral-800 flex justify-between items-center text-xs"
                         >
                           <div>
-                            <span className="font-mono text-blue-400 font-medium">{alloc.invoice_number}</span>
-                            <span className="text-[11px] text-slate-500 block">
+                            <span className="font-mono text-neutral-200 font-medium">{alloc.invoice_number}</span>
+                            <span className="text-[11px] text-neutral-400 block">
                               Approved by {alloc.actor} on {alloc.allocated_at ? new Date(alloc.allocated_at).toLocaleDateString() : '-'}
                             </span>
                           </div>
-                          <MoneyDisplay amountMinor={alloc.amount_minor} currency={alloc.currency} className="text-emerald-400 font-semibold" />
+                          <MoneyDisplay amountMinor={alloc.amount_minor} currency={alloc.currency} className="text-neutral-200 font-semibold" />
                         </div>
                       ))}
                     </div>
@@ -511,14 +511,14 @@ export function TransactionsPage({
                 {/* Linked AI Investigations */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                      <Sparkles size={12} className="text-violet-400" />
+                    <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                      <Sparkles size={12} className="text-neutral-200" />
                       Linked AI Investigations ({detail.investigations.length})
                     </h4>
                     {detail.unapplied_cash_minor > 0 && (
                       <button
                         onClick={() => onStartInvestigation(detail.provider_payment_id)}
-                        className="btn btn-secondary py-0.5 px-2 text-[10px] text-violet-300 border-violet-700/40 hover:bg-violet-900/20"
+                        className="btn btn-secondary py-0.5 px-2 text-[10px] text-neutral-200 border-neutral-500/40 hover:bg-neutral-900/20"
                       >
                         + New Investigation
                       </button>
@@ -526,7 +526,7 @@ export function TransactionsPage({
                   </div>
 
                   {detail.investigations.length === 0 ? (
-                    <p className="text-xs text-slate-500 italic p-3 bg-slate-900/40 rounded border border-slate-800/60">
+                    <p className="text-xs text-neutral-400 italic p-3 bg-neutral-900/40 rounded border border-neutral-800/60">
                       No AI investigations launched for this transaction.
                     </p>
                   ) : (
@@ -535,14 +535,14 @@ export function TransactionsPage({
                         <div
                           key={inv.id}
                           onClick={() => onInspectInvestigation(inv.id)}
-                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 hover:border-violet-500/50 cursor-pointer transition-all space-y-1.5"
+                          className="p-3 rounded-lg bg-neutral-900/90 border border-neutral-800 hover:border-neutral-400/50 cursor-pointer transition-all space-y-1.5"
                         >
                           <div className="flex justify-between items-center text-xs">
-                            <span className="font-mono font-bold text-violet-300">{inv.classification}</span>
+                            <span className="font-mono font-bold text-neutral-200">{inv.classification}</span>
                             <VerifierStatusBadge status={inv.verifier_status} />
                           </div>
-                          <p className="text-xs text-slate-400 line-clamp-2">{inv.summary}</p>
-                          <span className="text-[10px] text-blue-400 flex items-center gap-1 mt-1">
+                          <p className="text-xs text-neutral-400 line-clamp-2">{inv.summary}</p>
+                          <span className="text-[10px] text-neutral-200 flex items-center gap-1 mt-1">
                             Inspect forensic findings <ArrowRight size={10} />
                           </span>
                         </div>
@@ -552,20 +552,20 @@ export function TransactionsPage({
                 </div>
 
                 {/* Cryptographic Audit Events */}
-                <div className="space-y-2 pt-2 border-t border-slate-800">
-                  <h4 className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-                    <ShieldCheck size={12} className="text-slate-400" />
+                <div className="space-y-2 pt-2 border-t border-neutral-800">
+                  <h4 className="font-semibold text-neutral-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                    <ShieldCheck size={12} className="text-neutral-400" />
                     Transaction Audit Events
                   </h4>
                   {detail.audit_events.length === 0 ? (
-                    <p className="text-xs text-slate-500 italic">No specific audit events.</p>
+                    <p className="text-xs text-neutral-400 italic">No specific audit events.</p>
                   ) : (
                     <div className="space-y-1.5">
                       {detail.audit_events.map((ev, idx) => (
-                        <div key={idx} className="p-2.5 rounded bg-slate-950 border border-slate-800/80 text-xs flex justify-between items-center">
+                        <div key={idx} className="p-2.5 rounded bg-black border border-neutral-800/80 text-xs flex justify-between items-center">
                           <div>
-                            <span className="font-mono text-emerald-400 font-semibold">{ev.event_type}</span>
-                            <span className="text-[11px] text-slate-500 block">by {ev.actor}</span>
+                            <span className="font-mono text-neutral-200 font-semibold">{ev.event_type}</span>
+                            <span className="text-[11px] text-neutral-400 block">by {ev.actor}</span>
                           </div>
                           <HashBadge hash={ev.event_hash} label="Event Hash" />
                         </div>
