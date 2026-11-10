@@ -25,7 +25,7 @@ import {
   LoadingSpinner,
   Modal,
 } from '../components/Common';
-import { getFactSectionPresentation } from '../utils/formatters';
+import { getFactSectionPresentation, getInvestigationVerdict } from '../utils/formatters';
 
 export function InvestigationDetailPage({
   investigationId,
@@ -90,28 +90,11 @@ export function InvestigationDetailPage({
   const riskFlags = result.risk_flags || [];
   const verifierNotes = result.verifier_notes || inv.verifier_details?.notes || [];
 
-  const verifierDetails = inv.verifier_details || {};
-  const checkedInvariants = (verifierDetails.checked_invariants || {}) as Record<string, boolean>;
-  const hasVerifierIssues = Array.isArray(verifierDetails.issues) && verifierDetails.issues.length > 0;
-  const hasFailedInvariants =
-    Object.keys(checkedInvariants).length === 0 || Object.values(checkedInvariants).some((v) => v !== true);
-
-  const BLOCKING_PATTERNS = ['INJECTION', 'CURRENCY_MISMATCH', 'CONTRADICT', 'REVERSAL', 'DISPUTE', 'REJECTED', 'MALFORMED'];
-  const hasBlockingRiskFlag = (riskFlags || []).some((flag: string) =>
-    BLOCKING_PATTERNS.some((pat) => String(flag).toUpperCase().includes(pat))
-  );
-  const hasConflictingEvidence = Array.isArray(result.conflicting_evidence) && result.conflicting_evidence.length > 0;
-
-  const isEligibleVerifierStatus = inv.verifier_status === 'VERIFIED' || inv.verifier_status === 'NEEDS_REVIEW';
-  const isVerifierPassed =
-    isEligibleVerifierStatus &&
-    verifierDetails.passed === true &&
-    !hasVerifierIssues &&
-    !hasFailedInvariants &&
-    !hasBlockingRiskFlag &&
-    !hasConflictingEvidence;
-
-  const isInvalid = !isVerifierPassed;
+  // The fail-closed banner comes only from the deterministic verifier's verdict.
+  // Model-raised flags are advisory: shown, and able to hold approval, but never the verdict.
+  const verdict = getInvestigationVerdict(inv);
+  const isInvalid = verdict.verifierRejected;
+  const approvalBlocked = verdict.approvalBlocked;
   const isResolved = inv.status === 'APPROVED' || inv.status === 'REJECTED';
   const factSection = getFactSectionPresentation(isInvalid);
   const FactIcon = isInvalid ? XCircle : CheckCircle2;
@@ -135,7 +118,7 @@ export function InvestigationDetailPage({
 
   const handleApprove = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isInvalid) return;
+    if (approvalBlocked) return;
     setIsSubmitting(true);
     try {
       await api.approveInvestigation(inv.id, reviewer, notes, tenantId);
@@ -230,6 +213,33 @@ export function InvestigationDetailPage({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ADVISORY: flags the model raised on a run the verifier accepted */}
+      {!isInvalid && verdict.modelRaisedFlags.length > 0 && (
+        <div
+          data-testid="model-raised-flags"
+          className="p-4 rounded-lg bg-amber-950/30 border border-amber-600/50 text-amber-200 space-y-2"
+        >
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
+            <AlertTriangle size={14} className="text-amber-400" />
+            Model-raised flags (advisory)
+          </div>
+          <p className="text-xs text-amber-200/90 leading-relaxed">
+            The model raised these flags itself. They are not the verifier's verdict: the independent verifier
+            accepted this investigation's facts and citations. A human should check each flag before deciding.
+          </p>
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {verdict.modelRaisedFlags.map((flag, idx) => (
+              <span
+                key={idx}
+                className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-amber-900/50 border border-amber-700 text-amber-100"
+              >
+                {flag}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
@@ -462,6 +472,8 @@ export function InvestigationDetailPage({
           <span className="text-xs text-slate-400 font-mono">
             {isInvalid
               ? '⛔ Approval strictly blocked by safety verifier'
+              : approvalBlocked
+              ? '⏸ Approval held: model-raised flags need a human check'
               : isResolved
               ? '✓ Investigation has been decided and resolved'
               : '⚡ Requires authorized operator review to execute'}
@@ -478,11 +490,11 @@ export function InvestigationDetailPage({
 
             <button
               onClick={() => setIsApproveOpen(true)}
-              disabled={isInvalid || isResolved}
-              title={isInvalid ? 'Cannot approve: Safety verifier status is INVALID' : 'Approve and execute resolution'}
+              disabled={approvalBlocked || isResolved}
+              title={verdict.approvalBlockedReason ?? 'Approve and execute resolution'}
               className="btn btn-success text-xs font-semibold px-5 flex items-center gap-2"
             >
-              {isInvalid && <Lock size={12} />}
+              {approvalBlocked && <Lock size={12} />}
               <span>{isResolved ? 'Resolved' : 'Approve Proposed Resolution'}</span>
             </button>
           </div>
@@ -580,7 +592,7 @@ export function InvestigationDetailPage({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !reviewer.trim() || isInvalid}
+              disabled={isSubmitting || !reviewer.trim() || approvalBlocked}
               className="btn btn-success text-xs font-semibold px-4"
             >
               {isSubmitting ? 'Executing Allocation Transaction...' : 'Confirm & Authorize'}
