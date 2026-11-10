@@ -11,6 +11,7 @@ import {
   getMatcherExplanation,
   isApprovalEligible,
   getFactSectionPresentation,
+  getInvestigationVerdict,
 } from '../src/utils/formatters.ts';
 
 test('formatReconciliationRate handles zero denominator without showing 100%', () => {
@@ -272,4 +273,77 @@ test('investigation page takes its fact heading from the verifier outcome', () =
   assert.match(page, /getFactSectionPresentation\(isInvalid\)/);
   assert.doesNotMatch(page, />\s*Verified Facts/);
   assert.doesNotMatch(page, />\s*Grounded in DB Evidence/);
+});
+
+const ALL_INVARIANTS_PASSED = {
+  no_hallucinated_evidence: true,
+  amounts_match_evidence: true,
+  currency_consistent: true,
+  tenant_isolated: true,
+};
+
+test('verifier-accepted run with a model-raised flag is not shown as rejected', () => {
+  // Shape of the stored qwen3:8b run: verifier passed, model added PROMPT_INJECTION_DETECTED itself.
+  const verdict = getInvestigationVerdict({
+    verifier_status: 'NEEDS_REVIEW',
+    verifier_details: { passed: true, issues: [], checked_invariants: ALL_INVARIANTS_PASSED },
+    result: { risk_flags: ['PROMPT_INJECTION_DETECTED', 'CURRENCY_MISMATCH'] },
+  });
+  assert.strictEqual(verdict.verifierRejected, false);
+  assert.strictEqual(getFactSectionPresentation(verdict.verifierRejected).badge, 'Grounded in DB Evidence');
+  // No flag is hidden: both stay visible as advisory model-raised flags.
+  assert.deepStrictEqual(verdict.modelRaisedFlags, ['PROMPT_INJECTION_DETECTED', 'CURRENCY_MISMATCH']);
+  // Approval stays held for a human, matching the backend's fail-closed injection rule.
+  assert.strictEqual(verdict.approvalBlocked, true);
+  assert.match(verdict.approvalBlockedReason, /model raised/);
+  assert.doesNotMatch(verdict.approvalBlockedReason, /verifier rejected/i);
+});
+
+test('verifier-accepted run with no flags allows approval', () => {
+  const verdict = getInvestigationVerdict({
+    verifier_status: 'VERIFIED',
+    verifier_details: { passed: true, issues: [], checked_invariants: ALL_INVARIANTS_PASSED },
+    result: { risk_flags: [] },
+  });
+  assert.strictEqual(verdict.verifierRejected, false);
+  assert.strictEqual(verdict.approvalBlocked, false);
+  assert.strictEqual(verdict.approvalBlockedReason, null);
+});
+
+test('genuinely INVALID investigations still fail closed with the red banner', () => {
+  const invalid = getInvestigationVerdict({
+    verifier_status: 'INVALID',
+    verifier_details: { passed: false, issues: ['Cited evidence ev_x does not exist'], checked_invariants: { no_hallucinated_evidence: false } },
+    result: { risk_flags: ['PROMPT_INJECTION_DETECTED', 'VERIFIER_REJECTED'] },
+  });
+  assert.strictEqual(invalid.verifierRejected, true);
+  assert.strictEqual(invalid.approvalBlocked, true);
+  assert.match(invalid.approvalBlockedReason, /verifier rejected/);
+  assert.strictEqual(getFactSectionPresentation(invalid.verifierRejected).badge, 'Rejected by Verifier');
+  // Pipeline-added flags are not attributed to the model.
+  assert.deepStrictEqual(invalid.modelRaisedFlags, ['PROMPT_INJECTION_DETECTED']);
+});
+
+test('verifier verdict fails closed on any missing or failed verifier evidence', () => {
+  const base = { verifier_status: 'NEEDS_REVIEW', verifier_details: { passed: true, issues: [], checked_invariants: ALL_INVARIANTS_PASSED }, result: {} };
+  assert.strictEqual(getInvestigationVerdict(base).verifierRejected, false);
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_status: 'INVALID' }).verifierRejected, true);
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_status: undefined }).verifierRejected, true);
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_details: { ...base.verifier_details, passed: false } }).verifierRejected, true);
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_details: { ...base.verifier_details, issues: ['x'] } }).verifierRejected, true);
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_details: { ...base.verifier_details, checked_invariants: {} } }).verifierRejected, true);
+  assert.strictEqual(
+    getInvestigationVerdict({ ...base, verifier_details: { ...base.verifier_details, checked_invariants: { ...ALL_INVARIANTS_PASSED, tenant_isolated: false } } }).verifierRejected,
+    true,
+  );
+  assert.strictEqual(getInvestigationVerdict({ ...base, verifier_details: null }).verifierRejected, true);
+});
+
+test('investigation page takes its banner only from the verifier verdict', () => {
+  const page = readFileSync(new URL('../src/pages/InvestigationDetailPage.tsx', import.meta.url), 'utf8');
+  assert.match(page, /const isInvalid = verdict\.verifierRejected;/);
+  assert.match(page, /\{isInvalid && \(\s*<div[^>]*>\s*<div[^>]*>\s*<ShieldAlert[^]*?Verifier Failed Closed/);
+  assert.match(page, /Model-raised flags \(advisory\)/);
+  assert.doesNotMatch(page, /BLOCKING_PATTERNS/);
+  assert.match(page, /disabled=\{approvalBlocked \|\| isResolved\}/);
 });

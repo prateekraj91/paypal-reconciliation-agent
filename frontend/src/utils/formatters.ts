@@ -445,3 +445,77 @@ export function getFactSectionPresentation(isInvalid: boolean): FactSectionPrese
     rowClass: 'bg-emerald-950/20 border-emerald-500/20',
   };
 }
+
+/** Flags the pipeline itself adds when output is rejected; they are not model opinions. */
+const SYSTEM_RISK_FLAGS = new Set(['VERIFIER_REJECTED', 'MALFORMED_MODEL_OUTPUT', 'SCHEMA_VALIDATION_ERROR']);
+
+/** Model-raised flags that keep approval locked even when the verifier accepted the facts. */
+const APPROVAL_HOLD_PATTERNS = ['INJECTION', 'CURRENCY_MISMATCH', 'CONTRADICT', 'REVERSAL', 'DISPUTE', 'REJECTED', 'MALFORMED'];
+
+export interface InvestigationVerdictInput {
+  verifier_status?: string | null;
+  verifier_details?: {
+    passed?: boolean;
+    issues?: unknown;
+    checked_invariants?: Record<string, unknown> | null;
+  } | null;
+  result?: {
+    risk_flags?: unknown;
+    conflicting_evidence?: unknown;
+  } | null;
+}
+
+export interface InvestigationVerdict {
+  /** True only when the deterministic verifier did not accept the run. Drives the fail-closed banner. */
+  verifierRejected: boolean;
+  /** Every flag the model raised, shown as advisory when the verifier accepted the run. */
+  modelRaisedFlags: string[];
+  /** Model-raised flags that hold approval for a human to resolve. */
+  approvalHoldFlags: string[];
+  hasConflictingEvidence: boolean;
+  /** Approval stays locked if the verifier rejected the run or the model raised a hold flag. */
+  approvalBlocked: boolean;
+  approvalBlockedReason: string | null;
+}
+
+/**
+ * Separates the deterministic verifier's verdict from flags the model raised.
+ * Only the verifier's own fields decide `verifierRejected`; model flags can still
+ * lock approval, but they never turn an accepted run into a rejected one.
+ */
+export function getInvestigationVerdict(inv: InvestigationVerdictInput): InvestigationVerdict {
+  const details = inv.verifier_details || {};
+  const invariants = (details.checked_invariants || {}) as Record<string, unknown>;
+  const hasIssues = Array.isArray(details.issues) && details.issues.length > 0;
+  const hasFailedInvariants =
+    Object.keys(invariants).length === 0 || Object.values(invariants).some((v) => v !== true);
+  const isEligibleStatus = inv.verifier_status === 'VERIFIED' || inv.verifier_status === 'NEEDS_REVIEW';
+  const verifierRejected = !(isEligibleStatus && details.passed === true && !hasIssues && !hasFailedInvariants);
+
+  const rawFlags = inv.result?.risk_flags;
+  const allFlags = Array.isArray(rawFlags) ? rawFlags.map((f) => String(f)) : [];
+  const modelRaisedFlags = allFlags.filter((f) => !SYSTEM_RISK_FLAGS.has(f.toUpperCase()));
+  const approvalHoldFlags = modelRaisedFlags.filter((f) =>
+    APPROVAL_HOLD_PATTERNS.some((pat) => f.toUpperCase().includes(pat))
+  );
+  const conflicting = inv.result?.conflicting_evidence;
+  const hasConflictingEvidence = Array.isArray(conflicting) && conflicting.length > 0;
+
+  let approvalBlockedReason: string | null = null;
+  if (verifierRejected) {
+    approvalBlockedReason = 'Cannot approve: the independent verifier rejected this investigation';
+  } else if (approvalHoldFlags.length > 0) {
+    approvalBlockedReason = `Approval held: the model raised ${approvalHoldFlags.join(', ')} for a human to check`;
+  } else if (hasConflictingEvidence) {
+    approvalBlockedReason = 'Approval held: the model reported conflicting evidence for a human to check';
+  }
+
+  return {
+    verifierRejected,
+    modelRaisedFlags,
+    approvalHoldFlags,
+    hasConflictingEvidence,
+    approvalBlocked: approvalBlockedReason !== null,
+    approvalBlockedReason,
+  };
+}
