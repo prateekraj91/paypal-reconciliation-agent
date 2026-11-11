@@ -16,3 +16,5 @@ node_modules/
 frontend/node_modules/
 .vite/
 *.tsbuildinfo
+*.mp4
+paypal_reconciliation_demo.mp4

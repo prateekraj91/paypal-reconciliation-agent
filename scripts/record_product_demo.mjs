@@ -1,7 +1,61 @@
-import { chromium } from '/Users/prateekraj/.npm/_npx/e41f203b7505f1fb/node_modules/playwright/index.mjs';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { pathToFileURL } from 'url';
 import { execSync } from 'child_process';
+
+/**
+ * Portable Playwright resolution without machine-specific hardcoded paths.
+ * Resolves Playwright from:
+ * 1. Standard module resolution / NODE_PATH / package.json ('playwright')
+ * 2. Optional PLAYWRIGHT_PATH environment variable override
+ * 3. Local node_modules (root or frontend)
+ * 4. User npm npx cache directory (~/.npm/_npx)
+ */
+async function resolveChromium() {
+  if (process.env.PLAYWRIGHT_PATH && fs.existsSync(process.env.PLAYWRIGHT_PATH)) {
+    const mod = await import(pathToFileURL(process.env.PLAYWRIGHT_PATH).href);
+    return mod.chromium || mod.default?.chromium || mod;
+  }
+
+  try {
+    const mod = await import('playwright');
+    if (mod.chromium || mod.default?.chromium) {
+      return mod.chromium || mod.default?.chromium;
+    }
+  } catch {}
+
+  const localCandidates = [
+    path.resolve('node_modules/playwright/index.mjs'),
+    path.resolve('frontend/node_modules/playwright/index.mjs'),
+  ];
+  for (const candidate of localCandidates) {
+    if (fs.existsSync(candidate)) {
+      const mod = await import(pathToFileURL(candidate).href);
+      return mod.chromium || mod.default?.chromium;
+    }
+  }
+
+  const npxBase = path.join(os.homedir(), '.npm', '_npx');
+  if (fs.existsSync(npxBase)) {
+    try {
+      const dirs = fs.readdirSync(npxBase);
+      for (const dir of dirs) {
+        const candidate = path.join(npxBase, dir, 'node_modules', 'playwright', 'index.mjs');
+        if (fs.existsSync(candidate)) {
+          const mod = await import(pathToFileURL(candidate).href);
+          return mod.chromium || mod.default?.chromium;
+        }
+      }
+    } catch {}
+  }
+
+  throw new Error(
+    'Playwright is required to record the demo. Please install it (e.g. `npm install playwright`) or set PLAYWRIGHT_PATH.'
+  );
+}
+
+const chromium = await resolveChromium();
 
 const TOKEN = process.env.DEMO_ADMIN_API_KEY;
 if (!TOKEN || !TOKEN.trim()) {
@@ -341,7 +395,7 @@ async function moveAndClick(page, frameId, selector, opts = {}) {
   await loc.waitFor({ state: 'visible', timeout: 8000 });
   const box = await loc.boundingBox();
   if (!box) throw new Error('Could not get box for ' + selector);
-  
+
   const targetX = box.x + box.width / 2;
   const targetY = 74 + box.y + box.height / 2;
   await page.evaluate(({ x, y, d }) => window.moveCursor(x, y, d), { x: targetX, y: targetY, d: dur });
@@ -451,7 +505,7 @@ async function main() {
 
   console.log('Both tabs authenticated and ready!');
   console.log('Starting recording take! Removing pre-overlay...');
-  
+
   // Note the exact timestamp when recording begins (0:00)
   const recordingStartTime = Date.now();
   const preOverlayOffsetSec = (recordingStartTime - recordingInitTime) / 1000;
@@ -477,15 +531,15 @@ async function main() {
   // ==========================================
   console.log('[0:00] Beat 1: Tab 1, tenant = Demo Merchant Corp, overview screen');
   await sleep(3500);
-  
+
   // Hover over Active Tenant dropdown in sidebar
   await moveAndHover(page, '#frame1', 'aside select', 700);
   await sleep(2500);
-  
+
   // Hover over key metric cards on overview
   await moveAndHover(page, '#frame1', 'text=Open Exceptions', 800);
   await sleep(2500);
-  
+
   await moveAndHover(page, '#frame1', 'text=Open Payment Exceptions', 800);
   await sleep(2000);
 
@@ -510,7 +564,7 @@ async function main() {
   await waitTargetTime(21.0);
   await moveAndClick(page, '#frame1', 'button:has-text("Invoices & Ledger")', { dur: 600 });
   await sleep(1000);
-  
+
   // Hover over RECON-T-901 row and PAID badge
   await moveAndHover(page, '#frame1', 'text=RECON-T-901', 600);
   await sleep(2000);
@@ -679,7 +733,7 @@ async function main() {
   // Switch to Tab 2 (8001). Approve PAY-DEMO-EXACT-001.
   // ==========================================
   console.log('[2:20] Beat 6: Switch to Tab 2 (8001) and Approve PAY-DEMO-EXACT-001');
-  
+
   // Move cursor to Tab 2 button in top bar
   const tab2Box = await page.locator('#tab2').boundingBox();
   const t2X = tab2Box.x + tab2Box.width / 2;
@@ -702,7 +756,7 @@ async function main() {
   await exactRow.scrollIntoViewIfNeeded();
   await sleep(600);
   const exactApproveBtn = exactRow.locator('button:has-text("Approve")');
-  
+
   // Move to Approve button
   const aBox = await exactApproveBtn.boundingBox();
   if (aBox) {
@@ -739,11 +793,11 @@ async function main() {
   await sleep(3500);
 
   await moveAndHover(page, '#frame2', 'text=Cryptographic Audit Trail', 700);
-  
+
   await waitTargetTime(180.0);
 
   console.log('[3:00] Demo recording complete!');
-  
+
   await context.close();
   await browser.close();
 
