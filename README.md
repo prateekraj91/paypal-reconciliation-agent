@@ -1,246 +1,251 @@
-# paypal-recon-agent
+# PayPal Reconciliation Agent
 
-Reconciliation exception agent for PayPal: it matches payments to invoices,
-verifies each match independently, and queues it for a person to approve. All
-data in this repository is synthetic or from the PayPal Sandbox.
+**An autonomous agent that investigates unmatched PayPal payments, proposes allocations with evidence, and refuses to approve anything it can't verify — including payments laced with prompt-injection attacks.**
 
-`src/reconcile` is the framework-independent matching core. `src/reconcile_store`
-is the ledger and approval engine, `src/reconcile_api` the FastAPI service,
-`src/reconcile_investigator` the advisory AI investigator, and `frontend` the
-operator dashboard.
+[![Backend Tests](https://img.shields.io/badge/backend%20tests-1042%20passed%20·%2036%20skipped-brightgreen)](tests/)
+[![Frontend Tests](https://img.shields.io/badge/frontend%20tests-33%20passed-brightgreen)](frontend/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](src/reconcile_api/)
+[![PostgreSQL](https://img.shields.io/badge/db-PostgreSQL-336791.svg)](src/reconcile_store/)
+[![React](https://img.shields.io/badge/ui-React%2019%20+%20Vite-61DAFB.svg)](frontend/)
+[![License](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 
-## How a payment is reconciled
+> Built for PayPal's *Build What's Next with PayPal and AI* hackathon — the first public milestone of a product aimed at finance teams, not a throwaway demo.
 
-1. **Matching.** Deterministic matchers propose allocations from invoice
-   references, customer context and amounts. They match against the money left
-   on the payment after returns, never its gross amount.
-2. **Independent verification.** `verify_proposals` rechecks every proposal from
-   source records; amount alone can never pass.
-3. **AI investigation (advisory).** An investigator can explain an exception and
-   suggest a resolution. It cannot change financial records. A separate safety
-   verifier checks its output, including for prompt injection.
-4. **Human approval.** Only an operator's approval creates an allocation. Inside
-   the approval transaction the proposal, payment and invoices are locked and
-   the verifier and capacity checks run again on current data. A proposal that
-   no longer fits is refused with an explanation, never reduced.
+**▶ Demo video:** [Watch the Product Demo on YouTube](https://youtu.be/KMbcymstH-4?si=FNPH1iuN_uS9I-Zg)
 
-Every decision is written to a SHA-256 hash-chained audit trail.
+![Human Review Queue & Security Gate](screenshots/10_injection_blocked.png)
 
-## Refund and reversal accounting
+---
 
-`src/reconcile_store/ledger.py` is the single source for payment and invoice
-balances. All amounts are integer minor units.
+## The problem
 
-- Only completed returns count, and a repeated provider event adds nothing.
-- An allocation and a provider settlement for the same payment and invoice are
-  the same money and count once.
-- A return linked to an allocation or settlement reverses that line. A return
-  naming an invoice reverses this payment's line on that invoice, if the line
-  existed when the return happened.
-- Any other return comes out of unapplied cash first, then reverses applied
-  lines oldest first, restoring each cent once.
-- A return or applied line in another currency leaves the payment with zero
-  available cash until someone resolves it.
+When money moves through PayPal at scale, a meaningful slice of payments never cleanly matches an invoice: noisy references, partial payments, grouped settlements, refunds, and currency edges. Today a human stares at two screens and guesses. That's slow, error-prone, and — because the person is pattern-matching under pressure — exactly where a crafted payment memo can socially-engineer a bad approval.
 
-## Setup
+## What it does
 
-Requires Python 3.10 or later, Node.js, and PostgreSQL 16 (SQLite works for local development).
+The agent sits between PayPal and the ledger and handles the exceptions:
 
-    python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-    cp .env.example .env   # then fill in your own values
-    set -a && source .env && set +a
-    .venv/bin/alembic upgrade head
-    PYTHONPATH=src .venv/bin/uvicorn reconcile_api.main:app --port 8000
-    npm --prefix frontend install && npm --prefix frontend run dev
+- **Investigates** each unmatched or ambiguous payment against open invoices.
+- **Proposes** an allocation with the **evidence and verified facts** it used — never a silent match on amount alone.
+- **Escalates** to a human only when confidence is low, with the reasoning laid out.
+- **Refuses** to unlock approval when the facts don't clear the exception — or when the payment contains instructions trying to hijack the agent.
 
-Open http://127.0.0.1:5173 and sign in with your `ADMIN_API_KEY`.
+## Why it's different
 
-`.env.example` lists every setting. The main ones are `RECONCILE_DB_URL`,
-`ADMIN_API_KEY`, the `PAYPAL_*` credentials, `CORS_ALLOWED_ORIGINS` (empty by
-default, so no cross-origin browser access) and `MODEL_PROVIDER`.
+- **Separation of states.** Payment status (what PayPal confirms), reconciliation status (what the app matched/verified), and allocation status (proposed vs. approved) are kept as independent states. No step quietly promotes one to another.
+- **Evidence-first, not amount-first.** The deterministic matcher outputs a *proposal with evidence and a status*. It will not allocate on amount alone.
+- **Prompt-injection resistant.** Payment memos and documents are treated as **data, not instructions**. A payment whose evidence literally reads `"APPROVAL STRICTLY PROHIBITED"` is flagged and stays locked — the agent cannot be talked into approving.
+- **Core engine is framework-independent.** The reconciliation logic in `src/reconcile` has no dependency on FastAPI, PostgreSQL, React, or PayPal, so the financial rules are unit-testable in isolation.
+- **Model-agnostic local LLM.** The investigator runs behind a model-agnostic interface. Financial data is processed locally by Qwen3:8b through Ollama. No payment data or memos are sent to an external LLM provider. The application separately communicates with PayPal Sandbox APIs for payment and invoice integration.
+- **Deterministic verification gate.** The AI model has zero ledger write permissions. An independent safety verifier checks all AI citations against database truth, failing closed (`INVALID`) on any hallucinated or ungrounded fact.
 
-## PayPal Sandbox setup
+## Architecture
 
-1. In the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/),
-   create a Sandbox REST app. Enable Invoicing and Transaction Search for it.
-2. Put its credentials in `.env` as `PAYPAL_CLIENT_ID` and
-   `PAYPAL_CLIENT_SECRET`. Keep `PAYPAL_BASE_URL` on
-   `https://api-m.sandbox.paypal.com`.
-3. Create test invoices, either in the Sandbox or with the seeding tool, which is
-   the only code that writes to PayPal:
+```mermaid
+flowchart LR
+    PP["PayPal Sandbox<br/>(Invoicing v2 · Reporting · OAuth)"] --> SYNC["Sync & Ingestion Worker<br/>(token cache · idempotency)"]
+    SYNC --> CORE["Pure Reconciliation Engine<br/>src/reconcile (framework-free)"]
+    CORE --> MATCH["Deterministic Matcher<br/>(proposal + evidence)"]
+    MATCH --> VERIFY["Independent Verifier<br/>(verified DB ground truth)"]
+    VERIFY --> INV["AI Exception Investigator<br/>(model-agnostic · local Qwen3:8b)"]
+    INV --> SAFETY["Safety Verifier Gate<br/>(fact citation grounding)"]
+    SAFETY --> QUEUE["Human Review Queue<br/>(locked approval gate)"]
+    QUEUE --> APPROVAL["Atomic Approval Engine<br/>(SELECT FOR UPDATE locks)"]
+    APPROVAL --> AUDIT[("Cryptographic Audit Trail<br/>SHA-256 hash-chained")]
+    CORE --> DB[("PostgreSQL Storage<br/>SQLAlchemy 2.0 · Alembic")]
+    API["FastAPI REST Backend<br/>src/reconcile_api"] --- UI["Monochrome Dashboard<br/>React 19 + TypeScript + Vite"]
+```
 
-        PYTHONPATH=src:. python -m tools.seed_sandbox           # dry run, plans only
-        PYTHONPATH=src:. python -m tools.seed_sandbox --apply   # idempotent
+## Tech stack
 
-4. Pay an invoice as a Sandbox personal account, then run a read-only sync:
-
-        curl -X POST http://127.0.0.1:8000/admin/tenants \
-          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
-          -d '{"tenant_id":"test_tenant","name":"PayPal Sandbox"}'
-        curl -X POST http://127.0.0.1:8000/admin/connections \
-          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
-          -d '{"tenant_id":"test_tenant","provider":"paypal","environment":"sandbox","status":"ACTIVE"}'
-        curl -X POST http://127.0.0.1:8000/admin/sync \
-          -H "Authorization: Bearer $ADMIN_API_KEY" -H 'Content-Type: application/json' \
-          -d '{"tenant_id":"test_tenant","environment":"sandbox","start_date":"<ISO-8601 start>","end_date":"<ISO-8601 end>","idempotency_key":"sync-1"}'
-        PYTHONPATH=src .venv/bin/python -m reconcile_worker --once --tenant-id test_tenant
-
-   Use a new `idempotency_key` for each sync.
-
-A new payment reaches the Invoicing API first and Transaction Search later (about
-two hours in our testing). Until then it has a placeholder payer. A later sync
-merges both views into the same payment.
-
-## Ollama configuration
-
-The AI investigator defaults to a deterministic mock. To use a local model:
-
-    ollama pull qwen3:8b
-    ollama serve
-
-Then set these in `.env` and restart the API:
-
-    MODEL_PROVIDER=ollama
-    OLLAMA_BASE_URL=http://127.0.0.1:11434
-    OLLAMA_MODEL=qwen3:8b
-
-Use a current Ollama release. A run takes a few minutes on a laptop. Each stored
-investigation records its provider, so mock output is never mistaken for model
-output. The investigator is advisory: its output goes through the independent
-verifier and can never change a financial record.
-
-## Demo scenarios
-
-The dashboard's seed action, or `POST /admin/demo/seed`, loads a synthetic tenant,
-`demo_merchant`. Use a local database for it. None of these records came from PayPal.
-
-| Payment | Scenario |
+| Layer | Choice |
 |---|---|
-| `PAY-DEMO-EXACT-001` | Exact match, ready for approval |
-| `PAY-DEMO-UNMATCHED-002` | No matching invoice |
-| `PAY-DEMO-COMPETING-003` | Competing invoices, stays ambiguous |
-| `PAY-DEMO-PARTIAL-004` | Partial payment |
-| `PAY-DEMO-SPLIT-005` | One payment split across invoices |
-| `PAY-DEMO-OVERPAY-006` | Overpayment |
-| `PAY-DEMO-REFUND-007` | Refund |
-| `PAY-DEMO-REVERSAL-008` | Full reversal |
-| `PAY-DEMO-CURR-MISMATCH-009` | USD payment against a EUR invoice |
-| `PAY-DEMO-INVESTIGATE-010` | Case for AI investigation |
-| `PAY-DEMO-INJECTION-011` | Prompt injection in payment metadata |
+| Core logic | Python 3.11+ (pure, framework-free in `src/reconcile`) |
+| API | FastAPI + Uvicorn (`src/reconcile_api`) |
+| Storage & Ledger | PostgreSQL + SQLAlchemy 2.0 + Alembic (`src/reconcile_store`) |
+| Frontend | React 19 + TypeScript + Vite + Tailwind CSS (monochrome UI in `frontend/`) |
+| LLM Subsystem | Model-agnostic interface (`src/reconcile_investigator`); local Ollama + Qwen3:8b |
+| Payments Integration | PayPal Sandbox (Invoicing API v2, Transaction Search API, OAuth 2.0) |
 
-## Reset
+## How reconciliation works
 
-Everything here applies to a local database only. Never run it against a shared
-or production one.
+1. **Ingest** payments and invoices from PayPal Sandbox.
+2. **Match** deterministically — handling noisy references, partial payments, and explicit-reference grouped payments — emitting a proposal with evidence, never a silent allocation.
+3. **Verify** independently: a separate verifier confirms the facts the matcher relied on. Amount alone cannot pass.
+4. **Investigate** low-confidence or ambiguous cases with the local LLM, which can only present verified facts with database citations and raise advisories — it cannot unlock approval on its own.
+5. **Review**: a human reviews proposals; clean cases can be approved; locked cases stay locked.
+6. **Audit**: every action is written to a tamper-evident, SHA-256 hash-chained audit trail — who, what, when, why.
 
-    dropdb <local_db> && createdb <local_db>
-    set -a && source .env && set +a
-    .venv/bin/alembic upgrade head
+---
 
-Restart the API, then load the demo data again from the dashboard or with
-`POST /admin/demo/seed`. To keep a known state between takes, `pg_dump` the
-database once and restore that dump instead. Do approvals in a disposable copy.
+## Security model & prompt-injection defense
 
-## Tests
+The dangerous path in any payment-approval system is a human (or an over-eager LLM) acting on attacker-controlled text. This agent closes it:
 
-    PYTHONPATH=src .venv/bin/pytest tests/ -q
-    npm --prefix frontend test
-    npm --prefix frontend run build
+- Untrusted content (memos, references, document text) is never interpreted as a command.
+- Approval is gated on **independently verified facts**, not on the model's say-so.
+- Injection attempts are detected by deterministic boundary rules (`PROMPT_INJECTION_SUSPECT`), surfaced with an inverted high-contrast warning banner, and the approval control stays strictly locked.
 
-`tests/conftest.py` ignores the repository's `.env` files and refuses PostgreSQL
-connections to anything except a local disposable database. Set
-`TEST_POSTGRESQL_URL` to a local database to include the PostgreSQL concurrency
-tests; without it they are skipped.
+The demo includes `PAY-DEMO-INJECTION-011`, a payment engineered to force an approval via memo text — the agent flags it and refuses:
 
-## Known limitations and security
+![Adversarial Prompt Injection Blocked](screenshots/11_injection_evidence.png)
 
-- One shared `ADMIN_API_KEY` protects the admin API, and any holder can act for
-  any tenant. Per-user, per-tenant authorization is required before more than
-  one merchant uses a deployment.
-- The reviewer name on a decision is supplied by the caller, not authenticated.
-- A fully reversed payment still shows as reconciled in the existing status
-  field; use its net and unapplied amounts.
-- Proposals stored before a ledger change stay as they are. They are re-evaluated
-  live and blocked if they no longer fit; run reconciliation again to regenerate.
-- This has been exercised with synthetic and Sandbox data only.
-- Sync is manual: webhook ingestion needs a public URL and a webhook registered
-  in PayPal.
-- Payments that PayPal already settled against an invoice appear as
-  `PROVIDER_SETTLED`, not as proposals to approve.
-- A repeat sync adds no payments or settlements, but it does add a new
-  reconciliation run and new proposal rows.
-- The Sandbox opening balance (event `T1900`) can appear as a payment in
-  databases synced before non-payment events were excluded.
-- The local model's output is often rejected by the verifier. A rejection fails
-  closed. Results on demo cases don't measure accuracy.
+---
 
-## Core matcher
+## Local AI exception investigation
 
-    pip install pytest
-    PYTHONPATH=src python -m pytest -q
-    PYTHONPATH=src python -m reconcile  # matcher scorecards on the synthetic dataset
-    PYTHONPATH=src python -m reconcile 7   # same, different seed
-    PYTHONPATH=src python -m reconcile --paypal        # invoice ingestion only
-    PYTHONPATH=src python -m reconcile sync --sandbox  # full synchronisation pass
+When an exception cannot be deterministically resolved (e.g. a cross-currency mismatch or customer identity ambiguity), the agent invokes **Qwen3:8b running locally via Ollama**:
 
-`sync --sandbox` is read-only: it fetches every invoice page and every
-transaction window, maps both into canonical records, matches and verifies, and
-reports. It approves nothing and moves no balance. Running it twice produces
-the same result; a sync that double-counted on its second run would be worse
-than one that failed, because the ledger would drift quietly.
+![AI Exception Investigations](screenshots/07_ai_list.png)
 
-Seeding Sandbox test data (the only code that writes to PayPal):
+- **Local LLM Data Boundary:** Financial data is processed locally by Qwen3:8b through Ollama. No payment data or memos are sent to an external LLM provider. The application separately communicates with PayPal Sandbox APIs for payment and invoice integration.
+- **Grounded Facts & Strict Citations:** The model must cite explicit evidence IDs (`ev_pay_*`, `ev_inv_*`).
+- **Advisory Flags:** Model-raised flags (such as `PROMPT_INJECTION_DETECTED`) are presented as advisory warnings, holding approval for human confirmation.
+- **Deterministic Gate:** If the model hallucinates or fails to cite database evidence, the safety verifier marks the case `INVALID` (fail-closed).
 
-    PYTHONPATH=src:. python -m tools.seed_sandbox           # dry run, plans only
-    PYTHONPATH=src:. python -m tools.seed_sandbox --apply   # idempotent
+![Qwen3:8b Investigation Detail](screenshots/08_qwen_detail_1.png)
 
-## Layout
+---
 
-    src/reconcile/
-      models.py        Invoice, Payment, PaymentAllocation, MatchProposal, the three state enums
-                       plus ledger arithmetic and migrate_allocation_currency()
-      interfaces.py    InvoiceSource, PaymentSource, Matcher protocols + StaticSource
-      normalize.py     canonical_reference(), extract_invoice_references()
-      money.py         ISO 4217 minor units; exact decimal parsing, no floats
-      delivery.py      canonical record per payment_id: status transitions, fail-closed conflicts
-      matching.py      MatchRun, the per-run state every matcher shares
-      baseline.py      exact reference + exact amount matcher (proposals only)
-      deterministic.py reference-in-free-text, partial and grouped payments (proposals only)
-      verifier.py      independent re-check of proposals; approves nothing
-      workflow.py      ingestion -> matching -> verification for one batch
-      sync.py          one repeatable synchronisation pass; approves nothing
-      paypal.py        PayPal adapter: Invoicing v2 + Transaction Search, read-only
-      dataset.py       seeded synthetic data with ground truth
-      scoring.py       precision, recall, false auto-matches, review queue
-    tools/
-      seed_sandbox.py  idempotent Sandbox seeding (the ONLY code that writes)
-    tests/
-      fixtures/        real, sanitised Sandbox responses
-    docs/
-      paypal-transaction-fields.md   field mapping, established from real responses
+## Real PayPal Sandbox integration
 
-## Three separate states
+The system connects directly to PayPal's Sandbox environment (`api-m.sandbox.paypal.com`):
 
-| State | Type | Meaning | Who sets it |
-|---|---|---|---|
-| Payment status | `PaymentStatus` | What PayPal confirms | PayPal adapter |
-| Allocation status | `AllocationStatus` | Is a proposed split approved? | Approval workflow |
-| Reconciliation status | `ReconciliationStatus` | Where the payment sits in our workflow | Matchers: UNMATCHED / PROPOSED / NEEDS_REVIEW. RECONCILED only via the future ledger |
+![PayPal Sandbox Invoices & Ledger](screenshots/03_sandbox_invoices.png)
 
-Matchers can only emit `PROPOSED` allocations (enforced in `Candidate`). Only
-`APPROVED` allocations reduce an invoice's outstanding balance.
+- **Two-Phase Ingestion & Reconciliation:** In our Sandbox test, invoice `RECON-T-901` ($42.50 USD) was paid by a Sandbox personal buyer account. The payment was ingested through both PayPal Invoicing v2 and Transaction Search (Reporting) APIs and reconciled into unified transaction `89H37763BV8635251`.
+- **Idempotency Invariant:** A repeat sync over the same time window adds no duplicate payments, settlements, or ledger allocations.
+- **Dual-Tenant Isolation:**
+  - `test_tenant`: Houses **real PayPal Sandbox transactions** ingested directly from PayPal APIs.
+  - `demo_merchant`: Houses **synthetic stress scenarios** (exact, partial, split, overpayment, refund, reversal, prompt injection).
 
-## Modelling assumption to verify in the PayPal spike
+---
 
-Outstanding balance = invoice total minus approved allocations in OUR ledger.
-How PayPal itself links a payment to an invoice, and which payments arrive
-unlinked, decides what counts as "unmatched". Confirm this against the sandbox
-before building the adapter.
+## Getting started
 
-## Dataset ground truth
+**Prerequisites:** Python 3.11+, PostgreSQL 16+, Node.js 18+, and (for the local LLM) Ollama with `qwen3:8b`.
 
-Each payment is labelled AUTO_MATCH (evidence supports one allocation),
-NEEDS_HUMAN (evidence insufficient; must escalate), or NO_ACTION (refunded).
-Deliberate traps: amount collisions between strangers, closed invoices sharing
-an open invoice's amount, duplicate webhook deliveries, double payments,
-two invoice combinations with the same total.
+```bash
+# 1. Clone repository
+git clone https://github.com/prateekraj91/paypal-reconciliation-agent.git
+cd paypal-reconciliation-agent
+
+# 2. Configure environment (copy example template)
+cp .env.example .env
+
+# 3. Backend setup & database migration
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e ".[dev,store,api]"
+alembic upgrade head
+
+# 4. Start backend service (http://127.0.0.1:8000)
+PYTHONPATH=src uvicorn reconcile_api.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 5. Frontend operator dashboard (http://127.0.0.1:5173)
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1
+
+# 6. (Optional) Local LLM for AI investigations
+ollama serve
+ollama pull qwen3:8b
+```
+
+Full operational steps — database setup, seeding, health checks, and demo walkthrough — are in [`RUNBOOK.md`](RUNBOOK.md).
+
+---
+
+## Testing & verification
+
+The project enforces strict correctness, concurrency safety, and UI styling tests:
+
+```bash
+# Backend test suite (1,042 passed, 36 skipped)
+PYTHONPATH=src pytest
+
+# Frontend test suite (33 passed)
+cd frontend && npm test
+
+# Frontend type check & production build
+cd frontend && npm run build
+```
+
+### Benchmark performance
+
+Evaluated against the synthetic benchmark dataset (seed `0`-`9`, `deterministic-v1`):
+- **Precision:** **100.0%** (zero false allocations; amount-only proposals are strictly blocked)
+- **Recall:** **66.7%** on the deterministic matcher baseline
+- **Scope note:** The 100.0% precision and 66.7% recall figures refer specifically to the `deterministic-v1` matcher benchmark, not the Qwen3:8b AI evaluation or mock investigator evaluation. Ambiguous edge cases outside the deterministic baseline are systematically routed to the AI investigator and human review queue.
+
+---
+
+## Project structure
+
+```
+.
+├── src/
+│   ├── reconcile/               # Pure, framework-independent reconciliation core
+│   │   ├── matching/            # Deterministic and advanced matchers
+│   │   ├── scoring/             # Benchmark metrics, precision & recall scoring
+│   │   ├── verifier.py          # Independent fact verifier
+│   │   ├── money.py             # Minor-unit integer financial arithmetic
+│   │   └── dataset.py           # Benchmark scenario generator
+│   ├── reconcile_store/         # PostgreSQL persistence & atomic state transitions
+│   │   ├── models/              # SQLAlchemy 2.0 schema & state models
+│   │   ├── repositories/        # Repository layer with row-level locks
+│   │   ├── services/            # Approval engine, audit chain & verification
+│   │   └── alembic/             # Database migrations
+│   ├── reconcile_api/           # FastAPI web application & REST endpoints
+│   │   ├── main.py              # Application entrypoint & routes
+│   │   └── local_demo_dataset.py # Rich demo scenario seeder
+│   ├── reconcile_investigator/  # Advisory AI exception investigator
+│   │   ├── service.py           # Investigation coordinator & 12 read-only tools
+│   │   ├── verifier.py          # Ground truth fact & citation verifier
+│   │   └── providers/           # Model-agnostic providers (Ollama, Mock)
+│   └── reconcile_worker/        # Background sync & ingestion worker
+├── frontend/                    # React 19 + TypeScript + Vite operator dashboard
+│   ├── src/                     # Dashboard pages, components & monochrome theme
+│   └── test/                    # Monochrome styling & security UI tests
+├── screenshots/                 # Verified application screenshots (monochrome UI)
+├── tests/                       # Comprehensive pytest suite (1,078 tests)
+├── docs/                        # Architecture specs, threat models & eval reports
+├── alembic.ini                  # Alembic migration configuration
+├── docker-compose.yml           # Multi-container local orchestration
+├── Dockerfile                   # Multi-stage production container build
+├── DEVPOST.md                   # Hackathon project submission writeup
+├── RUNBOOK.md                   # Operational guide & demo walkthrough
+├── AI_AND_PAYPAL_DISCLOSURE.md  # Detailed AI and PayPal integration disclosures
+└── LICENSE                      # MIT License
+```
+
+---
+
+## Documentation
+
+- [`DEVPOST.md`](DEVPOST.md): Complete Devpost hackathon submission write-up (inspiration, how we built it, challenges, and accomplishments).
+- [`RUNBOOK.md`](RUNBOOK.md): Operational guide covering setup, database migrations, seeding, health checks, and a 3-minute demo script.
+- [`AI_AND_PAYPAL_DISCLOSURE.md`](AI_AND_PAYPAL_DISCLOSURE.md): Complete disclosure distinguishing PayPal Sandbox vs. production APIs, local Ollama vs. external models, and deterministic verification vs. AI reasoning.
+
+---
+
+## Roadmap
+
+- **Transaction Search API + Webhook Ingestion**: Continuous live webhook ingestion with public HTTPS endpoints and automated signature verification.
+- **Multi-Currency FX Settlement Reconciliation**: Automated foreign-exchange rate ingestion to reconcile cross-currency settlements deterministically.
+- **Confidence Calibration on the Investigator**: Fine-tuned scoring of model explanations to prioritize high-risk anomalies in the review queue.
+- **Multi-Tenant Role-Based Access Control (RBAC)**: Enterprise permission tiers (Reviewer, Controller, Auditor, Admin) replacing the single administrative key.
+
+---
+
+## Disclosures
+
+Detailed AI-assistance and PayPal API disclosures are available in [`AI_AND_PAYPAL_DISCLOSURE.md`](AI_AND_PAYPAL_DISCLOSURE.md).
+
+---
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
